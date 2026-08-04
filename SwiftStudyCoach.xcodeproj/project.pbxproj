@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		B62EC7D4302293400060CC0C /* NaturalLanguageEmbeddings in Frameworks */ = {isa = PBXBuildFile; productRef = B62EC7D3302293400060CC0C /* NaturalLanguageEmbeddings */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		B62EC7B930228F900060CC0C /* SwiftStudyCoach.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SwiftStudyCoach.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B62EC7D4302293400060CC0C /* NaturalLanguageEmbeddings in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = SwiftStudyCoach;
 			packageProductDependencies = (
+				B62EC7D3302293400060CC0C /* NaturalLanguageEmbeddings */,
 			);
 			productName = SwiftStudyCoach;
 			productReference = B62EC7B930228F900060CC0C /* SwiftStudyCoach.app */;
@@ -94,6 +100,9 @@
 			);
 			mainGroup = B62EC7B030228F900060CC0C;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B62EC7D2302293400060CC0C /* XCRemoteSwiftPackageReference "NaturalLanguageEmbeddings" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B62EC7BA30228F900060CC0C /* Products */;
 			projectDirPath = "";
@@ -331,6 +340,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		B62EC7D2302293400060CC0C /* XCRemoteSwiftPackageReference "NaturalLanguageEmbeddings" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/buh/NaturalLanguageEmbeddings.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B62EC7D3302293400060CC0C /* NaturalLanguageEmbeddings */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B62EC7D2302293400060CC0C /* XCRemoteSwiftPackageReference "NaturalLanguageEmbeddings" */;
+			productName = NaturalLanguageEmbeddings;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = B62EC7B130228F900060CC0C /* Project object */;
 }

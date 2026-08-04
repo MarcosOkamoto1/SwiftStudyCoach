@@ -10,19 +10,25 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var generator = StudyGenerator()
+    @State private var documentIndex = DocumentIndex()
+    @State private var generator: StudyGenerator?
     @State private var topic: String = "Optionals"
     @State private var result: TopicSummary?
     @State private var isLoading = false
+    @State private var isIndexing = false
     @State private var errorMessage: String?
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Status do modelo") {
-                    Text(generator.checkAvailability())
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let generator {
+                        Text(generator.checkAvailability())
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if isIndexing {
+                        ProgressView("Indexando documentação...")
+                    }
                 }
 
                 Section("Tópico de Swift") {
@@ -37,7 +43,7 @@ struct ContentView: View {
                             Text("Gerar resumo")
                         }
                     }
-                    .disabled(topic.isEmpty || isLoading)
+                    .disabled(topic.isEmpty || isLoading || generator == nil)
                 }
 
                 if let errorMessage {
@@ -66,10 +72,23 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Swift Study Coach")
+            .task {
+                if generator == nil {
+                    isIndexing = true
+                    do {
+                        try await documentIndex.buildIndex()
+                        generator = StudyGenerator(documentIndex: documentIndex)
+                    } catch {
+                        errorMessage = "Erro ao indexar documentação: \(error.localizedDescription)"
+                    }
+                    isIndexing = false
+                }
+            }
         }
     }
 
     private func generate() async {
+        guard let generator else { return }
         isLoading = true
         errorMessage = nil
         result = nil
