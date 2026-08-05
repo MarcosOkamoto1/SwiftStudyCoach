@@ -66,7 +66,6 @@ final class StudyGenerator {
 
         let prompt: String
         if context.isEmpty {
-            // Fallback: sem contexto recuperado (ex: tópico não indexado ainda).
             prompt = """
             Tópico: \(topic)
 
@@ -94,5 +93,21 @@ final class StudyGenerator {
         } catch {
             throw StudyGeneratorError.generationFailed(error)
         }
+    }
+    
+    // MARK: - MLX Integration (Perguntas Difíceis)
+    
+    /// Gera um rascunho de pergunta difícil usando o modelo local via MLX (Qwen-Coder)
+    func generateAdvancedQuiz(topic: String) async throws -> String {
+        // 1. Garante que o motor MLX está carregado na memória
+        try await MLXService.shared.loadModel()
+        
+        // 2. Busca o contexto relevante da documentação via RAG
+        let context = (try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? ""
+        
+        // 3. Chama o MLXService passando o texto recuperado pelo RAG
+        let quizDraft = try await MLXService.shared.generateQuestionDraft(promptContext: context.isEmpty ? topic : context)
+        
+        return quizDraft
     }
 }
