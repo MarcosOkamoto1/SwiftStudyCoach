@@ -298,7 +298,7 @@ final class StudyGenerator {
         guard case .available = model.availability else {
             throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
         }
-
+        
         let instructions = """
         Você é um mentor educacional especializado em Swift e nos frameworks da Apple.
         Responda sempre em português.
@@ -306,23 +306,38 @@ final class StudyGenerator {
         relatado abaixo — não invente erros ou acertos que não estão listados.
         Seja encorajador, mas honesto sobre os pontos a melhorar.
         """
-
+        
         let session = LanguageModelSession(model: model, instructions: instructions)
-
+        
         let prompt = """
         Tópico estudado: \(topic)
-
+        
         Desempenho do usuário nesta sessão:
         \(performanceSummary)
-
+        
         Gere um feedback de fim de sessão com base apenas nesse desempenho.
         """
-
+        
         do {
             let response = try await session.respond(to: prompt, generating: StudyFeedback.self)
             return response.content
         } catch {
             throw StudyGeneratorError.generationFailed(error)
         }
+        
+        
     }
+    func generateAdvancedQuiz(topic: String) async throws -> String {
+            try await MLXService.shared.loadModel()
+            let docIndex = DocumentIndex()
+            let context = (try? await docIndex.retrieveContext(for: topic, topK: 3)) ?? ""
+            
+            let prompt = """
+            Você é um especialista em Swift. Crie UMA pergunta de nível DIFÍCIL sobre '\(topic)'.
+            Contexto: \(context)
+            """
+            
+            return try await MLXService.shared.generateQuestionDraft(promptContext: prompt)
+        }
 }
+
