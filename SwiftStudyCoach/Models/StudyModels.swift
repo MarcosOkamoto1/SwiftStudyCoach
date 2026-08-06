@@ -6,12 +6,13 @@
 //  Cada @Generable vira, na prática, um contrato: o modelo é obrigado
 //  a devolver dados nesse formato (nada de parsear texto livre).
 //
+//  Os "Batch" existem porque pedir um array grande de structs complexas
+//  numa chamada só ao modelo on-device é menos confiável — por isso cada
+//  batch tem seu container próprio, gerado em lotes pequenos (ver
+//  StudyGenerator.generateQuizBatch / generateCodeAnalysisBatch).
+//
 
 import FoundationModels
-
-// MARK: - Etapa de hoje (04/08): só o resumo, pra validar o pipeline básico.
-// As outras structs (Flashcard, QuizQuestion, CodeAnalysisQuestion, StudyFeedback)
-// entram nos próximos dias — deixei comentadas como referência do que vem a seguir.
 
 @Generable
 struct TopicSummary {
@@ -25,45 +26,86 @@ struct TopicSummary {
     var codeExample: String
 }
 
-/*
- Próximos passos (referência, não implementar ainda):
+@Generable
+struct Flashcard {
+    @Guide(description: "Pergunta curta e objetiva sobre um conceito do tópico")
+    var question: String
 
- @Generable
- struct Flashcard {
-     var question: String
-     var answer: String
- }
+    @Guide(description: "Resposta objetiva e direta à pergunta, 1-2 frases")
+    var answer: String
+}
 
- @Generable
- enum Difficulty {
-     case easy, medium, hard
- }
+@Generable
+struct FlashcardBatch {
+    var flashcards: [Flashcard]
+}
 
- @Generable
- struct QuizQuestion {
-     var difficulty: Difficulty
-     var question: String
-     @Guide(description: "Exatamente 4 alternativas")
-     var options: [String]
-     var correctOptionIndex: Int
-     var explanation: String
- }
+@Generable
+enum Difficulty: String, CaseIterable {
+    case easy
+    case medium
+    case hard
+}
 
- @Generable
- struct CodeAnalysisQuestion {
-     var codeSnippet: String
-     var question: String
-     @Guide(description: "Exatamente 5 alternativas")
-     var options: [String]
-     var correctOptionIndex: Int
-     var explanation: String
- }
+@Generable
+struct QuizQuestion {
+    var difficulty: Difficulty
 
- @Generable
- struct StudyFeedback {
-     var strengths: [String]
-     var weaknesses: [String]
-     var recommendedNextTopic: String
-     var overallMessage: String
- }
- */
+    @Guide(description: "Pergunta de múltipla escolha em português sobre o tópico, no nível de dificuldade indicado. Dificuldade real deve vir do raciocínio exigido, não só do vocabulário usado.")
+    var question: String
+
+    @Guide(description: "Exatamente 4 alternativas de resposta, plausíveis entre si, em português")
+    var options: [String]
+
+    @Guide(description: "Índice (0 a 3) da alternativa correta dentro de options")
+    var correctOptionIndex: Int
+
+    @Guide(description: "Explicação breve de por que a alternativa correta está certa e as outras não")
+    var explanation: String
+}
+
+@Generable
+struct QuizQuestionBatch {
+    var questions: [QuizQuestion]
+}
+
+@Generable
+struct CodeAnalysisQuestion {
+    @Guide(description: "Trecho de código Swift (5-15 linhas) para o usuário analisar")
+    var codeSnippet: String
+
+    @Guide(description: "Pergunta sobre o comportamento, saída ou problema do trecho de código acima")
+    var question: String
+
+    @Guide(description: "Exatamente 5 alternativas de resposta, plausíveis entre si, em português")
+    var options: [String]
+
+    @Guide(description: "Índice (0 a 4) da alternativa correta dentro de options")
+    var correctOptionIndex: Int
+
+    @Guide(description: "Explicação breve de por que a alternativa correta está certa e as outras não")
+    var explanation: String
+}
+
+@Generable
+struct CodeAnalysisBatch {
+    var questions: [CodeAnalysisQuestion]
+}
+
+/// Feedback gerado ao final de uma sessão de estudo (quiz + análise de
+/// código), usado pela tela de resultado (Parte 7). Implementação mínima da
+/// Parte 6 — só o necessário pra tela final funcionar de ponta a ponta.
+@Generable
+struct StudyFeedback {
+    @Guide(description: "2 a 3 pontos fortes demonstrados pelo usuário nesta sessão, em português, específicos aos acertos observados (não genéricos)")
+    var strengths: [String]
+
+    @Guide(description: "2 a 3 pontos fracos ou temas pra revisar, em português, baseados especificamente nos erros cometidos nesta sessão")
+    var weaknesses: [String]
+
+    @Guide(description: "Nome curto de um próximo tópico de Swift recomendado, coerente com os erros cometidos")
+    var recommendedNextTopic: String
+
+    @Guide(description: "Mensagem geral curta e encorajadora sobre o desempenho, em português, 1-2 frases")
+    var overallMessage: String
+}

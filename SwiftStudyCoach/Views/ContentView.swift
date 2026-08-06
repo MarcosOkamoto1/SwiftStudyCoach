@@ -2,18 +2,27 @@
 //  ContentView.swift
 //  SwiftStudyCoach
 //
-//  Tela mínima de teste para o dia de hoje: digitar um tópico e ver
-//  o Foundation Models gerar um resumo estruturado. Sem design ainda —
-//  isso é só pra validar o pipeline.
+//  Tela mínima para validar persistência (SwiftData) + pool de quiz.
+//  Sem design ainda — isso é só pra confirmar que:
+//  - a 1ª visita a um tópico gera e persiste tudo
+//  - a 2ª visita (mesma versão de dataset) é instantânea, sem chamar o modelo
+//  - o quiz é sorteado do pool já existente, sem gerar nada na hora
 //
 
 import SwiftUI
+import SwiftData
 
 struct ContentView: View {
+    @Environment(\.modelContext) private var modelContext
+
     @State private var documentIndex = DocumentIndex()
     @State private var generator: StudyGenerator?
+    @State private var repository: TopicRepository?
+
     @State private var topic: String = "Optionals"
-    @State private var result: TopicSummary?
+    @State private var studyTopic: StudyTopic?
+    @State private var sampledQuiz: [PersistedQuizQuestion] = []
+
     @State private var isLoading = false
     @State private var isIndexing = false
     @State private var errorMessage: String?
@@ -35,15 +44,15 @@ struct ContentView: View {
                     TextField("Ex: Optionals, async/await, Generics", text: $topic)
 
                     Button {
-                        Task { await generate() }
+                        Task { await loadTopic() }
                     } label: {
                         if isLoading {
                             ProgressView()
                         } else {
-                            Text("Gerar resumo")
+                            Text("Carregar tópico (cache ou gerar)")
                         }
                     }
-                    .disabled(topic.isEmpty || isLoading || generator == nil)
+                    .disabled(topic.isEmpty || isLoading || repository == nil)
                 }
 
                 if let errorMessage {
@@ -53,55 +62,112 @@ struct ContentView: View {
                     }
                 }
 
-                if let result {
+                if let studyTopic {
                     Section("Resumo") {
-                        Text(result.summary)
+                        Text(studyTopic.summary)
+                        Text("dataset: \(studyTopic.sourceDatasetVersion)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
 
                     Section("Pontos-chave") {
-                        ForEach(result.keyPoints, id: \.self) { point in
+                        ForEach(studyTopic.keyPoints, id: \.self) { point in
                             Label(point, systemImage: "checkmark.circle")
                         }
                     }
 
                     Section("Exemplo de código") {
-                        Text(result.codeExample)
+                        Text(studyTopic.codeExample)
                             .font(.system(.body, design: .monospaced))
                             .textSelection(.enabled)
+                    }
+
+                    Section("Flashcards (\(studyTopic.flashcards.count))") {
+                        ForEach(studyTopic.flashcards) { card in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(card.question).bold()
+                                Text(card.answer).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    Section("Pool de quiz") {
+                        Text("Total no pool: \(studyTopic.quizPool.count) / 40")
+                        Text("Gerando em background: \(studyTopic.isGeneratingPool ? "sim" : "não")")
+                            .foregroundStyle(.secondary)
+
+                        Button("Sortear quiz (3 fácil + 4 média + 3 difícil)") {
+                            sampleQuiz()
+                        }
+                        .disabled(studyTopic.quizPool.isEmpty)
+
+                        ForEach(Array(sampledQuiz.enumerated()), id: \.offset) { _, question in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("[\(question.difficulty)] \(question.question)")
+                                    .bold()
+                                Text(question.options.joined(separator: "  •  "))
+                                    .font(.caption)
+                            }
+                        }
+                    }
+
+                    Section("Debug") {
+                        Button("Simular atualização de dataset (invalidar cache)") {
+                            // Só pra validar o critério de aceite de versionamento
+                            // sem precisar mudar código e recompilar.
+                            studyTopic.sourceDatasetVersion = "debug-invalidated"
+                            try? modelContext.save()
+                        }
                     }
                 }
             }
             .navigationTitle("Swift Study Coach")
             .task {
-                if generator == nil {
-                    isIndexing = true
-                    do {
-                        try await documentIndex.buildIndex()
-                        generator = StudyGenerator(documentIndex: documentIndex)
-                    } catch {
-                        errorMessage = "Erro ao indexar documentação: \(error.localizedDescription)"
-                    }
-                    isIndexing = false
-                }
+                await setup()
             }
         }
     }
 
-    private func generate() async {
-        guard let generator else { return }
+    private func setup() async {
+        guard generator == nil else { return }
+        isIndexing = true
+        do {
+            try await documentIndex.buildIndex()
+            let generator = StudyGenerator(documentIndex: documentIndex)
+            self.generator = generator
+            self.repository = TopicRepository(modelContext: modelContext, generator: generator)
+        } catch {
+            errorMessage = "Erro ao indexar documentação: \(error.localizedDescription)"
+        }
+        isIndexing = false
+    }
+
+    private func loadTopic() async {
+        guard let repository else { return }
         isLoading = true
         errorMessage = nil
-        result = nil
+        sampledQuiz = []
         defer { isLoading = false }
 
         do {
-            result = try await generator.generateSummary(topic: topic)
+            studyTopic = try await repository.fetchOrCreate(topic: topic)
         } catch {
             errorMessage = "Erro ao gerar: \(error.localizedDescription)"
         }
+    }
+
+    private func sampleQuiz() {
+        guard let studyTopic, let repository else { return }
+        sampledQuiz = repository.sampleQuiz(from: studyTopic)
     }
 }
 
 #Preview {
     ContentView()
+        .modelContainer(for: [
+            StudyTopic.self,
+            PersistedFlashcard.self,
+            PersistedQuizQuestion.self,
+            PersistedCodeAnalysisQuestion.self
+        ], inMemory: true)
 }

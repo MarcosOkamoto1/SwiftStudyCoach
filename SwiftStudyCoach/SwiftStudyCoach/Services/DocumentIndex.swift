@@ -70,10 +70,10 @@ final class DocumentIndex {
     /// isso também deixa o caminho pronto para o modo "tópico livre" (P2),
     /// onde a busca semântica volta a ser o caminho principal.
     func retrieveContext(for query: String, topK: Int = 3) async throws -> String {
-        let normalizedQuery = normalize(query)
+        let normalizedQuery = query.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
 
         let directMatches = chunks.filter { chunk in
-            let normalizedTopic = normalize(chunk.topic)
+            let normalizedTopic = chunk.topic.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             return normalizedTopic == normalizedQuery || normalizedTopic.contains(normalizedQuery) || normalizedQuery.contains(normalizedTopic)
         }
 
@@ -89,14 +89,6 @@ final class DocumentIndex {
         return results
             .map { $0.chunk.text }
             .joined(separator: "\n\n")
-    }
-
-    /// Normaliza removendo acento, case e espaços, para que variações de
-    /// digitação (ex: "navigation stack" vs "NavigationStack") batam no
-    /// mesmo tópico indexado.
-    private func normalize(_ s: String) -> String {
-        s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            .replacingOccurrences(of: " ", with: "")
     }
 }
 

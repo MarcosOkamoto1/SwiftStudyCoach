@@ -12,7 +12,6 @@
 
 /* Begin PBXFileReference section */
 		B62EC7B930228F900060CC0C /* SwiftStudyCoach.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SwiftStudyCoach.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B67FC13F3025054800665D84 /* SwiftStudyCoach.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = SwiftStudyCoach.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -47,13 +46,6 @@
 			isa = PBXGroup;
 			children = (
 				B62EC7B930228F900060CC0C /* SwiftStudyCoach.app */,
-			);
-			name = Products;
-			sourceTree = "<group>";
-		};
-		B67FC1403025054800665D84 /* Products */ = {
-			isa = PBXGroup;
-			children = (
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -114,12 +106,6 @@
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B62EC7BA30228F900060CC0C /* Products */;
 			projectDirPath = "";
-			projectReferences = (
-				{
-					ProductGroup = B67FC1403025054800665D84 /* Products */;
-					ProjectRef = B67FC13F3025054800665D84 /* SwiftStudyCoach.xcodeproj */;
-				},
-			);
 			projectRoot = "";
 			targets = (
 				B62EC7B830228F900060CC0C /* SwiftStudyCoach */,
