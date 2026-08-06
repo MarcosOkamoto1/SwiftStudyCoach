@@ -49,17 +49,12 @@ final class StudyGenerator {
     /// via RAG: o tópico é envolvido numa frase-molde antes de virar query
     /// de busca (uma palavra isolada, tipo "Optionals", embedda de forma
     /// menos confiável do que uma frase descritiva completa).
-    func generateSummary(topic: String) async throws -> TopicSummary {
+    func generateSummary(topic: String, context: String) async throws -> TopicSummary {
         let model = SystemLanguageModel.default
 
         guard case .available = model.availability else {
             throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
         }
-
-        // A busca híbrida do DocumentIndex já tenta casar o tópico
-        // diretamente antes de cair pra busca semântica — não precisamos
-        // mais artificializar a query aqui.
-        let context = (try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? ""
 
         let instructions = """
         Você é um assistente educacional especializado em Swift e nos frameworks da Apple.
@@ -264,12 +259,49 @@ final class StudyGenerator {
 
         Gere exatamente \(count) perguntas de análise de código NOVAS sobre o tópico
         acima (não repita os exemplos). Cada uma com um trecho de código diferente
-        (5-15 linhas) e exatamente 5 alternativas de resposta.
+        (5-15 linhas) e exatamente 5 alternativas de resposta. Misture questões de
+        dificuldade variada (fácil, média e difícil) no mesmo lote.
         """
 
         do {
             let response = try await session.respond(to: prompt, generating: CodeAnalysisBatch.self)
             return response.content.questions
+        } catch {
+            throw StudyGeneratorError.generationFailed(error)
+        }
+    }
+
+    /// Gera o feedback de fim de sessão (Parte 6, implementação mínima),
+    /// a partir de um resumo textual do desempenho — quais perguntas o
+    /// usuário acertou/errou nesta sessão de quiz + análise de código.
+    func generateFeedback(topic: String, performanceSummary: String) async throws -> StudyFeedback {
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else {
+            throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
+        }
+
+        let instructions = """
+        Você é um mentor educacional especializado em Swift e nos frameworks da Apple.
+        Responda sempre em português.
+        Dê um feedback específico e construtivo baseado apenas no desempenho
+        relatado abaixo — não invente erros ou acertos que não estão listados.
+        Seja encorajador, mas honesto sobre os pontos a melhorar.
+        """
+
+        let session = LanguageModelSession(model: model, instructions: instructions)
+
+        let prompt = """
+        Tópico estudado: \(topic)
+
+        Desempenho do usuário nesta sessão:
+        \(performanceSummary)
+
+        Gere um feedback de fim de sessão com base apenas nesse desempenho.
+        """
+
+        do {
+            let response = try await session.respond(to: prompt, generating: StudyFeedback.self)
+            return response.content
         } catch {
             throw StudyGeneratorError.generationFailed(error)
         }

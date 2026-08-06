@@ -15,7 +15,10 @@ import SwiftData
 /// Trocar esse valor invalida automaticamente todo o cache existente —
 /// ver `TopicRepository.fetchOrCreate`.
 enum DatasetVersion {
-    static let current = "placeholder-v1"  // trocar para "apple-docs-v1" quando substituir o conteúdo
+    // `var` (não `let`) de propósito: permite trocar em runtime a partir da
+    // tela de teste (TopicRepositoryTestView) para validar a invalidação de
+    // cache sem precisar recompilar o app.
+    static var current = "apple-docs-v1"
 }
 
 @Model

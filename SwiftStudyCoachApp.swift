@@ -10,7 +10,7 @@ import SwiftData
 struct SwiftStudyCoachApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootTabView()
         }
         .modelContainer(for: [
             StudyTopic.self,

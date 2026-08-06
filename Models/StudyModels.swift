@@ -92,14 +92,20 @@ struct CodeAnalysisBatch {
     var questions: [CodeAnalysisQuestion]
 }
 
-/*
- Próximos passos (referência, não implementar ainda):
+/// Feedback gerado ao final de uma sessão de estudo (quiz + análise de
+/// código), usado pela tela de resultado (Parte 7). Implementação mínima da
+/// Parte 6 — só o necessário pra tela final funcionar de ponta a ponta.
+@Generable
+struct StudyFeedback {
+    @Guide(description: "2 a 3 pontos fortes demonstrados pelo usuário nesta sessão, em português, específicos aos acertos observados (não genéricos)")
+    var strengths: [String]
 
- @Generable
- struct StudyFeedback {
-     var strengths: [String]
-     var weaknesses: [String]
-     var recommendedNextTopic: String
-     var overallMessage: String
- }
- */
+    @Guide(description: "2 a 3 pontos fracos ou temas pra revisar, em português, baseados especificamente nos erros cometidos nesta sessão")
+    var weaknesses: [String]
+
+    @Guide(description: "Nome curto de um próximo tópico de Swift recomendado, coerente com os erros cometidos")
+    var recommendedNextTopic: String
+
+    @Guide(description: "Mensagem geral curta e encorajadora sobre o desempenho, em português, 1-2 frases")
+    var overallMessage: String
+}
