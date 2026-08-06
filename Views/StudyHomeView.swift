@@ -15,7 +15,7 @@ struct StudyHomeView: View {
     @State private var topicName: String = ""
     @State private var navigateTo: String?
 
-    private let suggestions = ["Guard", "Optionals", "Actors", "Property Wrappers", "async/await"]
+    private let suggestions = ["NavigationStack", "Property Wrappers", "Guard"]
 
     var body: some View {
         NavigationStack {

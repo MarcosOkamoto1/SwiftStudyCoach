@@ -62,6 +62,10 @@ final class StudyGenerator {
         Baseie-se PRINCIPALMENTE no contexto de documentação fornecido abaixo.
         Se o contexto não cobrir algum detalhe, seja conservador e não invente
         nomes de métodos, parâmetros ou comportamentos que não estão no contexto.
+        Ao gerar exemplos de código, sempre inclua comentários em português explicando
+        CADA linha ou bloco relevante, como se estivesse ensinando alguém que está
+        vendo aquilo pela primeira vez. Use nomes de variáveis e funções descritivos,
+        nunca genéricos (evite "x", "foo", "data" sem contexto).
         """
 
         let session = LanguageModelSession(model: model, instructions: instructions)
@@ -73,7 +77,13 @@ final class StudyGenerator {
             Tópico: \(topic)
 
             Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
-            iniciante/intermediário, incluindo pontos-chave e um exemplo de código curto.
+            iniciante/intermediário, incluindo pontos-chave e um exemplo de código.
+
+            O exemplo de código deve:
+            - Ter comentários explicando cada linha ou bloco relevante
+            - Ir além do caso mais trivial possível — mostrar pelo menos uma nuance real
+              do conceito, não só a sintaxe básica
+            - Usar nomes descritivos, nunca genéricos
             """
         } else {
             prompt = """
@@ -83,7 +93,13 @@ final class StudyGenerator {
             \(context)
 
             Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
-            iniciante/intermediário, incluindo pontos-chave e um exemplo de código curto.
+            iniciante/intermediário, incluindo pontos-chave e um exemplo de código.
+
+            O exemplo de código deve:
+            - Ter comentários explicando cada linha ou bloco relevante
+            - Ir além do caso mais trivial possível — mostrar pelo menos uma nuance real
+              do conceito, não só a sintaxe básica
+            - Usar nomes descritivos, nunca genéricos
             """
         }
 
@@ -149,6 +165,9 @@ final class StudyGenerator {
         Você é um assistente educacional especializado em Swift e nos frameworks da Apple.
         Responda sempre em português.
         Baseie-se PRINCIPALMENTE no contexto de documentação fornecido.
+        Use EXCLUSIVAMENTE as informações do contexto fornecido — não use
+        conhecimento geral sobre outros tópicos de Swift além do que está descrito
+        no contexto abaixo, mesmo que pareça relacionado.
         Gere perguntas de múltipla escolha com exatamente 4 alternativas, sendo
         apenas uma correta.
         """

@@ -38,6 +38,15 @@ final class TopicRepository {
     func fetchOrCreate(topic: String) async throws -> StudyTopic {
         if let existing = try fetchExisting(topic: topic) {
             if existing.sourceDatasetVersion == DatasetVersion.current {
+                if existing.quizPool.isEmpty {
+                    // Registro quebrado (de uma geração anterior que falhou no
+                    // meio do caminho): não confiar cegamente no cache HIT,
+                    // apagar e regenerar do zero.
+                    print("🟠 fetchOrCreate: '\(topic)' está em cache mas com quizPool vazio — tratando como quebrado, regenerando.")
+                    modelContext.delete(existing)
+                    try modelContext.save()
+                    return try await generateAndPersist(topic: topic)
+                }
                 print("🟢 fetchOrCreate: cache HIT para '\(topic)' (dataset '\(existing.sourceDatasetVersion)') — nenhuma chamada ao Foundation Models.")
                 return existing // cache válido — nenhuma chamada ao Foundation Models
             }
@@ -84,19 +93,14 @@ final class TopicRepository {
         // de quiz e de análise de código).
         let context = await generator.retrieveContext(for: topic)
 
+        // Gera tudo primeiro em variáveis locais — só insere/salva no
+        // SwiftData depois que resumo, flashcards, quiz e análise de código
+        // tiverem sido gerados com sucesso. Se qualquer chamada falhar, o
+        // throws propaga antes de tocar no modelContext, e nada fica
+        // persistido pela metade (o que deixaria o cache "quebrado" HIT
+        // permanentemente com quizPool vazio).
         let summary = try await generator.generateSummary(topic: topic, context: context)
         let flashcards = try await generator.generateFlashcards(topic: topic, context: context)
-
-        let studyTopic = StudyTopic(
-            name: topic,
-            summary: summary.summary,
-            keyPoints: summary.keyPoints,
-            codeExample: summary.codeExample
-        )
-        studyTopic.flashcards = flashcards.map { PersistedFlashcard(from: $0) }
-
-        modelContext.insert(studyTopic)
-        try modelContext.save()
 
         // Lote inicial síncrono (usuário espera): 5 fácil + 6 média + 4
         // difícil = 15, cada dificuldade numa chamada separada — nunca uma
@@ -104,12 +108,20 @@ final class TopicRepository {
         let easy = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .easy, count: 5)
         let medium = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .medium, count: 6)
         let hard = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .hard, count: 4)
-
-        studyTopic.quizPool = (easy + medium + hard).map { PersistedQuizQuestion(from: $0) }
-
         let codeAnalysis = try await generator.generateCodeAnalysisBatch(topic: topic, context: context, count: 4)
+
+        // Só chega aqui (e só insere/salva) se TUDO acima teve sucesso.
+        let studyTopic = StudyTopic(
+            name: topic,
+            summary: summary.summary,
+            keyPoints: summary.keyPoints,
+            codeExample: summary.codeExample
+        )
+        studyTopic.flashcards = flashcards.map { PersistedFlashcard(from: $0) }
+        studyTopic.quizPool = (easy + medium + hard).map { PersistedQuizQuestion(from: $0) }
         studyTopic.codeAnalysisPool = codeAnalysis.map { PersistedCodeAnalysisQuestion(from: $0) }
 
+        modelContext.insert(studyTopic)
         try modelContext.save()
 
         startBackgroundGrowthIfNeeded(for: studyTopic, topicName: topic, context: context)
