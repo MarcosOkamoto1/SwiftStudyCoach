@@ -38,11 +38,15 @@ final class TopicRepository {
     func fetchOrCreate(topic: String) async throws -> StudyTopic {
         if let existing = try fetchExisting(topic: topic) {
             if existing.sourceDatasetVersion == DatasetVersion.current {
+                print("🟢 fetchOrCreate: cache HIT para '\(topic)' (dataset '\(existing.sourceDatasetVersion)') — nenhuma chamada ao Foundation Models.")
                 return existing // cache válido — nenhuma chamada ao Foundation Models
             }
             // Versão do dataset mudou: descarta o cache antigo e regenera.
+            print("🟠 fetchOrCreate: cache STALE para '\(topic)' — versão salva '\(existing.sourceDatasetVersion)' != atual '\(DatasetVersion.current)'. Descartando e regenerando.")
             modelContext.delete(existing)
             try modelContext.save()
+        } else {
+            print("⚪️ fetchOrCreate: nenhum cache para '\(topic)' — gerando do zero.")
         }
         return try await generateAndPersist(topic: topic)
     }
@@ -70,12 +74,17 @@ final class TopicRepository {
     }
 
     private func generateAndPersist(topic: String) async throws -> StudyTopic {
+        // TEMP DEBUG (checklist Parte 5, item 4): confirma que esse método só
+        // roda na primeira visita a um tópico. Se aparecer de novo numa
+        // segunda visita ao MESMO tópico (mesma DatasetVersion), é bug de cache.
+        print("🔵 generateAndPersist CHAMADO para '\(topic)' — isso deveria acontecer só na 1ª visita (ou após trocar DatasetVersion.current).")
+
         // Contexto de documentação recuperado uma única vez e reaproveitado
         // em todas as chamadas de geração abaixo (resumo, flashcards, lotes
         // de quiz e de análise de código).
         let context = await generator.retrieveContext(for: topic)
 
-        let summary = try await generator.generateSummary(topic: topic)
+        let summary = try await generator.generateSummary(topic: topic, context: context)
         let flashcards = try await generator.generateFlashcards(topic: topic, context: context)
 
         let studyTopic = StudyTopic(
