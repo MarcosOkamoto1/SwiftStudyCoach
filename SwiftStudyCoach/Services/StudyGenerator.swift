@@ -170,7 +170,7 @@ final class StudyGenerator {
             return [hardQuestion]
         }
         
-        // 🍏 Usar o Foundation Model para Fácil e Média
+        // Usar o Foundation Model para Fácil e Média
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {
             throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
@@ -210,62 +210,100 @@ final class StudyGenerator {
         }
     }
 
-    /// Gera um lote de perguntas de análise de código (100% gerenciado pelo MLX de forma estruturada)
-    func generateCodeAnalysisBatch(topic: String, context: String, count: Int) async throws -> [CodeAnalysisQuestion] {
+    private struct MLXCodeAnalysisDTO: Decodable {
+        let codeSnippet: String
+        let question: String
+        let options: [String]
+        let correctOptionIndex: Int
+        let explanation: String
+    }
+
+    /// Gera um lote de perguntas de análise de código (100% dinâmico via MLX + JSON structured output)
+    func generateCodeAnalysisBatch(topic: String, context: String, count: Int = 5) async throws -> [CodeAnalysisQuestion] {
         try await MLXService.shared.loadModel()
         
         let ragContext = context.isEmpty ? ((try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? "") : context
 
         let prompt = """
-        Você é um especialista em Swift. Escreva APENAS um trecho de código Swift limpo de 6 a 10 linhas sobre '\(topic)'.
+        Você é um especialista em Swift. Crie UMA pergunta técnica de análise de código sobre '\(topic)'.
 
         [Contexto RAG]:
         \(ragContext.isEmpty ? "Conhecimento geral sobre Swift e Apple Frameworks." : ragContext)
 
-        [Instrução]:
-        Retorne APENAS o código Swift puro, sem markdown, sem explicações e sem JSON.
+        [Instruções de Saída]:
+        Retorne APENAS um objeto JSON válido (sem texto antes ou depois, sem explicações) com exatamente este formato:
+        {
+          "codeSnippet": "código Swift de 5 a 10 linhas em uma única string com \\n para quebras de linha",
+          "question": "Pergunta sobre o comportamento do código",
+          "options": ["Opção A", "Opção B", "Opção C", "Opção D"],
+          "correctOptionIndex": 0,
+          "explanation": "Explicação clara do porquê a opção correta é a certa e o que o código faz."
+        }
         """
 
         do {
-            let rawDraft = try await MLXService.shared.generateQuestionDraft(promptContext: prompt)
+            var questionsBatch: [CodeAnalysisQuestion] = []
+            let targetCount = count > 0 ? count : 5
             
-            // Higienização completa do snippet de código
-            var cleanedSnippet = rawDraft
-                .replacingOccurrences(of: "```swift", with: "")
-                .replacingOccurrences(of: "```json", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            if cleanedSnippet.isEmpty {
-                cleanedSnippet = """
-                import SwiftUI
-
-                struct \(topic.replacingOccurrences(of: " ", with: ""))DemoView: View {
-                    @State private var isActive: Bool = false
-                    
-                    var body: some View {
-                        Text("Demonstração de \(topic)")
-                    }
+            for index in 0..<targetCount {
+                let rawDraft = try await MLXService.shared.generateQuestionDraft(promptContext: prompt)
+                
+                // 1. Limpeza de marcadores Markdown (```json ... ```)
+                var cleanJSON = rawDraft
+                    .replacingOccurrences(of: "```json", with: "")
+                    .replacingOccurrences(of: "```swift", with: "")
+                    .replacingOccurrences(of: "```", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // Extrai o bloco de JSON se o modelo colocou texto em volta
+                if let firstBrace = cleanJSON.firstIndex(of: "{"),
+                   let lastBrace = cleanJSON.lastIndex(of: "}") {
+                    cleanJSON = String(cleanJSON[firstBrace...lastBrace])
                 }
-                """
+                
+                // 2. Tenta fazer o parse do JSON retornado pelo MLX
+                if let jsonData = cleanJSON.data(using: .utf8),
+                   let dto = try? JSONDecoder().decode(MLXCodeAnalysisDTO.self, from: jsonData),
+                   dto.options.count >= 4 {
+                    
+                    let questionFromMLX = CodeAnalysisQuestion(
+                        codeSnippet: dto.codeSnippet,
+                        question: dto.question,
+                        options: Array(dto.options.prefix(4)), // Garante 4 alternativas
+                        correctOptionIndex: dto.correctOptionIndex < 4 ? dto.correctOptionIndex : 0,
+                        explanation: dto.explanation
+                    )
+                    questionsBatch.append(questionFromMLX)
+                    
+                } else {
+                    // 3. Fallback de Segurança caso o MLX gere um JSON malformado
+                    let fallbackQuestion = CodeAnalysisQuestion(
+                        codeSnippet: """
+                        import SwiftUI
+
+                        struct \(topic.replacingOccurrences(of: " ", with: ""))Demo\(index + 1): View {
+                            @State private var count = 0
+                            var body: some View {
+                                Button("Incrementar: \\(count)") { count += 1 }
+                            }
+                        }
+                        """,
+                        question: "Analisando o código Swift acima sobre '\(topic)', qual é o comportamento do estado ao clicar no botão?",
+                        options: [
+                            "O estado é atualizado e a interface re-renderiza exibindo o novo valor.",
+                            "Ocorre um erro de compilação por tentar mutar um estado imutável.",
+                            "Causa uma condição de corrida (data race) em tempo de execução.",
+                            "O botão é desativado após o primeiro clique."
+                        ],
+                        correctOptionIndex: 0,
+                        explanation: "Propriedades marcadas com @State em SwiftUI são gerenciadas pelo framework. Quando o valor muda, a View invalida seu corpo e re-renderiza o componente com o estado atualizado."
+                    )
+                    questionsBatch.append(fallbackQuestion)
+                }
             }
 
-            // Monta o objeto com o código gerado pelo MLX e opções técnicas válidas
-            let questionFromMLX = CodeAnalysisQuestion(
-                codeSnippet: cleanedSnippet,
-                question: "Analisando o código Swift acima sobre '\(topic)', qual é o resultado ou comportamento esperado?",
-                options: [
-                    "Executa normalmente e produz o resultado esperado sem erros",
-                    "Ocorre um erro de compilação devido a incompatibilidade de tipos ou sintaxe",
-                    "Provoca um vazamento de memória (retain cycle) com closures ou instâncias",
-                    "Causa uma exceção / erro em tempo de execução (fatal error)",
-                    "O estado permanece inalterado por se tratar de um tipo de valor imutável"
-                ],
-                correctOptionIndex: 0,
-                explanation: "Análise de código gerada localmente pelo MLX com suporte RAG da documentação oficial de \(topic)."
-            )
-
-            return [questionFromMLX]
+            return questionsBatch
+            
         } catch {
             throw StudyGeneratorError.generationFailed(error)
         }
