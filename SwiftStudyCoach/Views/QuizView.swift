@@ -5,20 +5,20 @@
 //  Parte 7 — uma pergunta por vez, seleção de alternativa, feedback
 //  imediato certo/errado, progresso ("pergunta X de Y").
 //
+
 import SwiftUI
 
 struct QuizView: View {
     let topicName: String
-    @State var questions: [PersistedQuizQuestion]
+    let questions: [PersistedQuizQuestion]
+    /// Chamado quando o usuário termina (ou sai) o quiz, com tudo que foi
+    /// respondido até aquele ponto — a tela de resultado decide o que fazer.
     var onFinish: ([AnsweredQuestion]) -> Void = { _ in }
 
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
     @State private var selectedOption: Int?
     @State private var answers: [AnsweredQuestion] = []
-    
-    // 🤖 Controle de geração do MLX para a pergunta Difícil
-    @State private var isLoadingHardQuestion = false
 
     var body: some View {
         DSScreen {
@@ -30,20 +30,6 @@ struct QuizView: View {
                     Text("Nenhuma pergunta de quiz disponível.")
                         .font(DS.Fonts.body(15))
                         .foregroundStyle(DS.Colors.mist)
-                    Spacer()
-                } else if isLoadingHardQuestion {
-                    // 🔄 Tela de carregamento enquanto o MLX pensa
-                    Spacer()
-                    VStack(spacing: 16) {
-                        ProgressView()
-                            .tint(DS.Colors.violet)
-                        Text("Gerando desafio Nível DIFÍCIL com MLX local...")
-                            .font(DS.Fonts.mono(12))
-                            .foregroundStyle(DS.Colors.violet)
-                        Text("Buscando contexto na documentação Swift...")
-                            .font(DS.Fonts.body(13))
-                            .foregroundStyle(DS.Colors.mistDim)
-                    }
                     Spacer()
                 } else {
                     ScrollView {
@@ -60,9 +46,6 @@ struct QuizView: View {
                     footer
                 }
             }
-        }
-        .onAppear {
-            checkAndGenerateHardQuestionIfNeeded()
         }
     }
 
@@ -220,42 +203,6 @@ struct QuizView: View {
         }
         selectedOption = nil
         index += 1
-        
-        // 🤖 Verifica se a próxima pergunta é a DIFÍCIL para acionar o MLX
-        checkAndGenerateHardQuestionIfNeeded()
-    }
-
-    // 🤖 LÓGICA AUTOMÁTICA DO MLX
-    private func checkAndGenerateHardQuestionIfNeeded() {
-        guard let question = currentQuestion, question.difficulty == "hard" else { return }
-        
-        Task {
-            await MainActor.run { isLoadingHardQuestion = true }
-            
-            do {
-                let generator = StudyGenerator(documentIndex: DocumentIndex())
-                // Chama o MLX + RAG para gerar a pergunta difícil em tempo real
-                let hardDraft = try await generator.generateAdvancedQuiz(topic: topicName)
-                
-                await MainActor.run {
-                    // Atualiza a pergunta atual na lista com o texto gerado pelo MLX
-                    if questions.indices.contains(index) {
-                        questions[index] = PersistedQuizQuestion(
-                            difficulty: "hard",
-                            question: hardDraft,
-                            options: questions[index].options, // Mantém ou adapta opções
-                            correctOptionIndex: questions[index].correctOptionIndex,
-                            explanation: "Gerado via MLX com RAG da documentação oficial de \(topicName)."
-                        )
-                    }
-                    isLoadingHardQuestion = false
-                }
-            } catch {
-                await MainActor.run {
-                    isLoadingHardQuestion = false
-                }
-            }
-        }
     }
 
     private func difficultyLabel(_ difficulty: Difficulty) -> String {
