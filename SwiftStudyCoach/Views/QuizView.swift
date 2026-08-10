@@ -213,8 +213,7 @@ struct QuizView: View {
         }
     }
 }
-
-/// Linha de alternativa reaproveitada por Quiz e Análise de Código.
+/// Linha de alternativa reaproveitada pelo Quiz.
 struct OptionRow: View {
     enum State { case idle, correct, incorrect, disabled }
 
@@ -285,19 +284,4 @@ struct OptionRow: View {
         case .incorrect: return DS.Colors.orchid.opacity(0.5)
         }
     }
-}
-
-#Preview {
-    QuizView(
-        topicName: "Actors",
-        questions: [
-            PersistedQuizQuestion(
-                difficulty: "easy",
-                question: "O que protege um actor?",
-                options: ["Seu estado mutável", "A rede", "O disco", "Nada"],
-                correctOptionIndex: 0,
-                explanation: "Actors serializam acesso ao próprio estado mutável."
-            )
-        ]
-    )
 }

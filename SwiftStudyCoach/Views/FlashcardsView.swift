@@ -97,7 +97,7 @@ struct FlashcardsView: View {
                         .stroke(DS.Colors.hairline, lineWidth: 1)
                 )
 
-            VStack(spacing: 18) {
+            VStack(spacing: 16) {
                 Text(label)
                     .font(DS.Fonts.mono(10.5))
                     .tracking(1.4)
@@ -108,7 +108,8 @@ struct FlashcardsView: View {
                         .font(DS.Fonts.display(22))
                         .foregroundStyle(DS.Colors.foam)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
+                        .padding(20)
+                   
                 }
 
                 Text("toque pra virar")

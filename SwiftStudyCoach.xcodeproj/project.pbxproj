@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2E4EBBCD3025152B00C3543F /* MLXEmbedders in Frameworks */ = {isa = PBXBuildFile; productRef = 2E4EBBCC3025152B00C3543F /* MLXEmbedders */; };
+		2E4EBBCF3025152B00C3543F /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 2E4EBBCE3025152B00C3543F /* MLXLLM */; };
+		2E4EBBD13025152B00C3543F /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 2E4EBBD03025152B00C3543F /* MLXLMCommon */; };
+		2E4EBBD33025152B00C3543F /* MLXMNIST in Frameworks */ = {isa = PBXBuildFile; productRef = 2E4EBBD23025152B00C3543F /* MLXMNIST */; };
+		2E4EBBD53025152B00C3543F /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = 2E4EBBD43025152B00C3543F /* MLXVLM */; };
+		2E4EBBD73025152B00C3543F /* StableDiffusion in Frameworks */ = {isa = PBXBuildFile; productRef = 2E4EBBD63025152B00C3543F /* StableDiffusion */; };
 		B62EC7D4302293400060CC0C /* NaturalLanguageEmbeddings in Frameworks */ = {isa = PBXBuildFile; productRef = B62EC7D3302293400060CC0C /* NaturalLanguageEmbeddings */; };
 /* End PBXBuildFile section */
 
@@ -28,6 +34,12 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2E4EBBCF3025152B00C3543F /* MLXLLM in Frameworks */,
+				2E4EBBD73025152B00C3543F /* StableDiffusion in Frameworks */,
+				2E4EBBD33025152B00C3543F /* MLXMNIST in Frameworks */,
+				2E4EBBD53025152B00C3543F /* MLXVLM in Frameworks */,
+				2E4EBBCD3025152B00C3543F /* MLXEmbedders in Frameworks */,
+				2E4EBBD13025152B00C3543F /* MLXLMCommon in Frameworks */,
 				B62EC7D4302293400060CC0C /* NaturalLanguageEmbeddings in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -35,10 +47,18 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		2E4EBBCB3025152A00C3543F /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		B62EC7B030228F900060CC0C = {
 			isa = PBXGroup;
 			children = (
 				B62EC7BB30228F900060CC0C /* SwiftStudyCoach */,
+				2E4EBBCB3025152A00C3543F /* Frameworks */,
 				B62EC7BA30228F900060CC0C /* Products */,
 			);
 			sourceTree = "<group>";
@@ -79,6 +99,12 @@
 			name = SwiftStudyCoach;
 			packageProductDependencies = (
 				B62EC7D3302293400060CC0C /* NaturalLanguageEmbeddings */,
+				2E4EBBCC3025152B00C3543F /* MLXEmbedders */,
+				2E4EBBCE3025152B00C3543F /* MLXLLM */,
+				2E4EBBD03025152B00C3543F /* MLXLMCommon */,
+				2E4EBBD23025152B00C3543F /* MLXMNIST */,
+				2E4EBBD43025152B00C3543F /* MLXVLM */,
+				2E4EBBD63025152B00C3543F /* StableDiffusion */,
 			);
 			productName = SwiftStudyCoach;
 			productReference = B62EC7B930228F900060CC0C /* SwiftStudyCoach.app */;
@@ -110,6 +136,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				B62EC7D2302293400060CC0C /* XCRemoteSwiftPackageReference "NaturalLanguageEmbeddings" */,
+				2EF33F7C302510560086CB4C /* XCRemoteSwiftPackageReference "mlx-swift-examples" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B62EC7BA30228F900060CC0C /* Products */;
@@ -276,10 +303,20 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = CG2X3DK9Y3;
+				DEVELOPMENT_TEAM = NDBT4GP95T;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -308,10 +345,20 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = CG2X3DK9Y3;
+				DEVELOPMENT_TEAM = NDBT4GP95T;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -356,6 +403,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		2EF33F7C302510560086CB4C /* XCRemoteSwiftPackageReference "mlx-swift-examples" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift-examples";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.29.1;
+			};
+		};
 		B62EC7D2302293400060CC0C /* XCRemoteSwiftPackageReference "NaturalLanguageEmbeddings" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/buh/NaturalLanguageEmbeddings.git";
@@ -367,6 +422,36 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		2E4EBBCC3025152B00C3543F /* MLXEmbedders */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2EF33F7C302510560086CB4C /* XCRemoteSwiftPackageReference "mlx-swift-examples" */;
+			productName = MLXEmbedders;
+		};
+		2E4EBBCE3025152B00C3543F /* MLXLLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2EF33F7C302510560086CB4C /* XCRemoteSwiftPackageReference "mlx-swift-examples" */;
+			productName = MLXLLM;
+		};
+		2E4EBBD03025152B00C3543F /* MLXLMCommon */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2EF33F7C302510560086CB4C /* XCRemoteSwiftPackageReference "mlx-swift-examples" */;
+			productName = MLXLMCommon;
+		};
+		2E4EBBD23025152B00C3543F /* MLXMNIST */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2EF33F7C302510560086CB4C /* XCRemoteSwiftPackageReference "mlx-swift-examples" */;
+			productName = MLXMNIST;
+		};
+		2E4EBBD43025152B00C3543F /* MLXVLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2EF33F7C302510560086CB4C /* XCRemoteSwiftPackageReference "mlx-swift-examples" */;
+			productName = MLXVLM;
+		};
+		2E4EBBD63025152B00C3543F /* StableDiffusion */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2EF33F7C302510560086CB4C /* XCRemoteSwiftPackageReference "mlx-swift-examples" */;
+			productName = StableDiffusion;
+		};
 		B62EC7D3302293400060CC0C /* NaturalLanguageEmbeddings */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = B62EC7D2302293400060CC0C /* XCRemoteSwiftPackageReference "NaturalLanguageEmbeddings" */;

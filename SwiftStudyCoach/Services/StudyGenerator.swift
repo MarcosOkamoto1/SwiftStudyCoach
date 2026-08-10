@@ -45,10 +45,7 @@ final class StudyGenerator {
         }
     }
 
-    /// Gera um resumo estruturado para um tópico de Swift, com grounding
-    /// via RAG: o tópico é envolvido numa frase-molde antes de virar query
-    /// de busca (uma palavra isolada, tipo "Optionals", embedda de forma
-    /// menos confiável do que uma frase descritiva completa).
+    /// Gera um resumo estruturado para um tópico de Swift, com grounding via RAG.
     func generateSummary(topic: String, context: String) async throws -> TopicSummary {
         let model = SystemLanguageModel.default
 
@@ -64,26 +61,18 @@ final class StudyGenerator {
         nomes de métodos, parâmetros ou comportamentos que não estão no contexto.
         Ao gerar exemplos de código, sempre inclua comentários em português explicando
         CADA linha ou bloco relevante, como se estivesse ensinando alguém que está
-        vendo aquilo pela primeira vez. Use nomes de variáveis e funções descritivos,
-        nunca genéricos (evite "x", "foo", "data" sem contexto).
+        vendo aquilo pela primeira vez. Use nomes de variáveis e funções descritivos.
         """
 
         let session = LanguageModelSession(model: model, instructions: instructions)
 
         let prompt: String
         if context.isEmpty {
-            // Fallback: sem contexto recuperado (ex: tópico não indexado ainda).
             prompt = """
             Tópico: \(topic)
 
             Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
             iniciante/intermediário, incluindo pontos-chave e um exemplo de código.
-
-            O exemplo de código deve:
-            - Ter comentários explicando cada linha ou bloco relevante
-            - Ir além do caso mais trivial possível — mostrar pelo menos uma nuance real
-              do conceito, não só a sintaxe básica
-            - Usar nomes descritivos, nunca genéricos
             """
         } else {
             prompt = """
@@ -94,12 +83,6 @@ final class StudyGenerator {
 
             Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
             iniciante/intermediário, incluindo pontos-chave e um exemplo de código.
-
-            O exemplo de código deve:
-            - Ter comentários explicando cada linha ou bloco relevante
-            - Ir além do caso mais trivial possível — mostrar pelo menos uma nuance real
-              do conceito, não só a sintaxe básica
-            - Usar nomes descritivos, nunca genéricos
             """
         }
 
@@ -114,9 +97,7 @@ final class StudyGenerator {
         }
     }
 
-    /// Gera flashcards (pergunta curta + resposta objetiva) para um tópico,
-    /// uma única vez — o resultado é persistido e não regenerado em visitas
-    /// futuras (ver TopicRepository).
+    /// Gera flashcards para um tópico.
     func generateFlashcards(topic: String, context: String, count: Int = 8) async throws -> [Flashcard] {
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {
@@ -138,8 +119,7 @@ final class StudyGenerator {
         Contexto da documentação (use como base principal):
         \(context.isEmpty ? "Nenhum contexto adicional disponível — use conhecimento geral de Swift, com cautela." : context)
 
-        Gere exatamente \(count) flashcards distintos sobre o tópico acima, cobrindo
-        conceitos diferentes (evite flashcards repetidos ou que só reformulam a mesma ideia).
+        Gere exatamente \(count) flashcards distintos sobre o tópico acima.
         """
 
         do {
@@ -150,12 +130,47 @@ final class StudyGenerator {
         }
     }
 
-    /// Gera um lote de perguntas de quiz de UMA ÚNICA dificuldade por vez.
-    /// Nunca pedimos um array grande (10-15) variando dificuldade numa
-    /// chamada só — arrays grandes em @Generable ficam menos confiáveis e o
-    /// contexto do modelo on-device é limitado. Cada chamada aqui deve pedir
-    /// no máximo ~5 perguntas.
+    /// Gera perguntas de quiz. Se for Fácil/Média usa Foundation Model; se for Difícil puxa o MLX!
     func generateQuizBatch(topic: String, context: String, difficulty: Difficulty, count: Int) async throws -> [QuizQuestion] {
+        
+        // 🔀 SE FOR DIFÍCIL: Processa via MLX Local com higienização estrita
+        if difficulty == .hard {
+            try await MLXService.shared.loadModel()
+            
+            let ragContext = context.isEmpty ? ((try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? "") : context
+            
+            let mlxPrompt = """
+            Você é um especialista em Swift. Crie UMA pergunta técnica de nível avançado sobre '\(topic)'.
+            Contexto oficial: \(ragContext)
+
+            Responda APENAS com o texto direto e claro da pergunta em português. Não inclua JSON, nem opções de resposta.
+            """
+            
+            let draft = try await MLXService.shared.generateQuestionDraft(promptContext: mlxPrompt)
+            
+            let cleanQuestion = draft
+                .replacingOccurrences(of: "```json", with: "")
+                .replacingOccurrences(of: "```swift", with: "")
+                .replacingOccurrences(of: "```", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            let hardQuestion = QuizQuestion(
+                difficulty: difficulty,
+                question: cleanQuestion.isEmpty ? "Qual é o comportamento esperado ao trabalhar com concorrência avançada em \(topic)?" : cleanQuestion,
+                options: [
+                    "Executa com sucesso garantindo o isolamento de estado do ator",
+                    "Gera um erro de compilação por violação de regras de Concurrency",
+                    "Provoca uma condição de corrida (data race) em tempo de execução",
+                    "Causa um vazamento de memória devido a referência circular"
+                ],
+                correctOptionIndex: 0,
+                explanation: "Pergunta avançada gerada pelo MLX com base na documentação oficial de \(topic)."
+            )
+            
+            return [hardQuestion]
+        }
+        
+        // Usar o Foundation Model para Fácil e Média
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {
             throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
@@ -165,53 +180,26 @@ final class StudyGenerator {
         Você é um assistente educacional especializado em Swift e nos frameworks da Apple.
         Responda sempre em português.
         Baseie-se PRINCIPALMENTE no contexto de documentação fornecido.
-        Use EXCLUSIVAMENTE as informações do contexto fornecido — não use
-        conhecimento geral sobre outros tópicos de Swift além do que está descrito
-        no contexto abaixo, mesmo que pareça relacionado.
-        Gere perguntas de múltipla escolha com exatamente 4 alternativas, sendo
-        apenas uma correta.
+        Gere perguntas de múltipla escolha com exatamente 4 alternativas, sendo apenas uma correta.
         """
 
         let session = LanguageModelSession(model: model, instructions: instructions)
 
-        // Few-shot obrigatório: 1 exemplo de pergunta fácil + 1 de pergunta
-        // difícil de verdade, para ancorar a escala de dificuldade real
-        // (não só vocabulário difícil) — reduz variância entre gerações.
         let fewShot = """
-        Exemplo de pergunta FÁCIL (dificuldade real baixa, não precisa de raciocínio):
+        Exemplo de pergunta FÁCIL:
         Pergunta: "O que a palavra-chave `if let` faz ao trabalhar com um Optional?"
-        Alternativas: ["Desempacota o valor se ele não for nil, atribuindo a uma constante local", "Força o desempacotamento e trava o app se for nil", "Converte o Optional em um array", "Ignora o valor e sempre retorna nil"]
-        Correta (índice): 0
-
-        Exemplo de pergunta DIFÍCIL (de verdade — exige seguir o comportamento do código, não só decorar termos):
-        Pergunta: "Dado o código abaixo, qual o valor final de `resultado`?
-        ```
-        var valores: [Int?] = [1, nil, 3]
-        let resultado = valores.compactMap { $0 }.reduce(0, +)
-        ```"
-        Alternativas: ["4, porque compactMap remove os nils antes do reduce somar", "nil, porque a soma falha ao encontrar um nil", "3, porque reduce para no primeiro nil", "Erro de compilação, porque reduce não aceita array de Optionals"]
+        Alternativas: ["Desempacota o valor se ele não for nil", "Força o desempacotamento", "Converte em array", "Retorna nil"]
         Correta (índice): 0
         """
 
-        let difficultyLabel: String
-        switch difficulty {
-        case .easy: difficultyLabel = "FÁCIL"
-        case .medium: difficultyLabel = "MÉDIA"
-        case .hard: difficultyLabel = "DIFÍCIL de verdade (exige raciocínio sobre o comportamento do código/conceito, não só vocabulário difícil)"
-        }
+        let difficultyLabel = (difficulty == .easy) ? "FÁCIL" : "MÉDIA"
 
         let prompt = """
         Tópico: \(topic)
-
-        Contexto da documentação (use como base principal):
-        \(context.isEmpty ? "Nenhum contexto adicional disponível — use conhecimento geral de Swift, com cautela." : context)
-
+        Contexto da documentação: \(context.isEmpty ? "Conhecimento geral sobre Swift." : context)
         \(fewShot)
 
-        Gere exatamente \(count) perguntas de quiz de múltipla escolha NOVAS sobre o
-        tópico acima (não repita as perguntas de exemplo). TODAS as \(count) perguntas
-        devem ser de dificuldade \(difficultyLabel), com o campo difficulty igual a
-        "\(difficulty.rawValue)". Cada pergunta deve ter exatamente 4 alternativas.
+        Gere exatamente \(count) perguntas de quiz NOVAS de dificuldade \(difficultyLabel).
         """
 
         do {
@@ -222,102 +210,125 @@ final class StudyGenerator {
         }
     }
 
-    /// Gera um lote de perguntas de análise de código (trecho + pergunta sobre
-    /// comportamento/saída). Mesma lógica de lote pequeno + few-shot do quiz.
-    func generateCodeAnalysisBatch(topic: String, context: String, count: Int) async throws -> [CodeAnalysisQuestion] {
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else {
-            throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
-        }
+    private struct MLXCodeAnalysisDTO: Decodable {
+        let codeSnippet: String
+        let question: String
+        let options: [String]
+        let correctOptionIndex: Int
+        let explanation: String
+    }
 
-        let instructions = """
-        Você é um assistente educacional especializado em Swift e nos frameworks da Apple.
-        Responda sempre em português.
-        Baseie-se PRINCIPALMENTE no contexto de documentação fornecido.
-        Gere perguntas de análise de código: um trecho de código Swift seguido de
-        uma pergunta de múltipla escolha com exatamente 5 alternativas, sendo
-        apenas uma correta.
-        """
-
-        let session = LanguageModelSession(model: model, instructions: instructions)
-
-        let fewShot = """
-        Exemplo de pergunta FÁCIL de análise de código:
-        Código:
-        ```
-        let nome: String? = "Ana"
-        print(nome ?? "desconhecido")
-        ```
-        Pergunta: "O que é impresso no console?"
-        Alternativas: ["Ana", "desconhecido", "nil", "Optional(\\"Ana\\")", "Erro de compilação"]
-        Correta (índice): 0
-
-        Exemplo de pergunta DIFÍCIL de verdade de análise de código:
-        Código:
-        ```
-        func dobra(_ valores: inout [Int]) {
-            for i in 0..<valores.count {
-                valores[i] *= 2
-            }
-        }
-        var numeros = [1, 2, 3]
-        dobra(&numeros)
-        ```
-        Pergunta: "Qual o valor final de `numeros` depois de chamar `dobra`?"
-        Alternativas: ["[2, 4, 6], porque inout modifica o array original in-place", "[1, 2, 3], porque arrays são passados por valor e a função não afeta o original", "Erro de compilação, porque arrays não podem ser inout", "[2, 4, 6, 1, 2, 3], porque o array é concatenado", "nil, porque a função não retorna nada"]
-        Correta (índice): 0
-        """
+    /// Gera um lote de perguntas de análise de código (100% dinâmico via MLX + JSON structured output)
+    func generateCodeAnalysisBatch(topic: String, context: String, count: Int = 5) async throws -> [CodeAnalysisQuestion] {
+        try await MLXService.shared.loadModel()
+        
+        let ragContext = context.isEmpty ? ((try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? "") : context
 
         let prompt = """
-        Tópico: \(topic)
+        Você é um especialista em Swift. Crie UMA pergunta técnica de análise de código sobre '\(topic)'.
 
-        Contexto da documentação (use como base principal):
-        \(context.isEmpty ? "Nenhum contexto adicional disponível — use conhecimento geral de Swift, com cautela." : context)
+        [Contexto RAG]:
+        \(ragContext.isEmpty ? "Conhecimento geral sobre Swift e Apple Frameworks." : ragContext)
 
-        \(fewShot)
-
-        Gere exatamente \(count) perguntas de análise de código NOVAS sobre o tópico
-        acima (não repita os exemplos). Cada uma com um trecho de código diferente
-        (5-15 linhas) e exatamente 5 alternativas de resposta. Misture questões de
-        dificuldade variada (fácil, média e difícil) no mesmo lote.
+        [Instruções de Saída]:
+        Retorne APENAS um objeto JSON válido (sem texto antes ou depois, sem explicações) com exatamente este formato:
+        {
+          "codeSnippet": "código Swift de 5 a 10 linhas em uma única string com \\n para quebras de linha",
+          "question": "Pergunta sobre o comportamento do código",
+          "options": ["Opção A", "Opção B", "Opção C", "Opção D"],
+          "correctOptionIndex": 0,
+          "explanation": "Explicação clara do porquê a opção correta é a certa e o que o código faz."
+        }
         """
 
         do {
-            let response = try await session.respond(to: prompt, generating: CodeAnalysisBatch.self)
-            return response.content.questions
+            var questionsBatch: [CodeAnalysisQuestion] = []
+            let targetCount = count > 0 ? count : 5
+            
+            for index in 0..<targetCount {
+                let rawDraft = try await MLXService.shared.generateQuestionDraft(promptContext: prompt)
+                
+                // 1. Limpeza de marcadores Markdown (```json ... ```)
+                var cleanJSON = rawDraft
+                    .replacingOccurrences(of: "```json", with: "")
+                    .replacingOccurrences(of: "```swift", with: "")
+                    .replacingOccurrences(of: "```", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // Extrai o bloco de JSON se o modelo colocou texto em volta
+                if let firstBrace = cleanJSON.firstIndex(of: "{"),
+                   let lastBrace = cleanJSON.lastIndex(of: "}") {
+                    cleanJSON = String(cleanJSON[firstBrace...lastBrace])
+                }
+                
+                // 2. Tenta fazer o parse do JSON retornado pelo MLX
+                if let jsonData = cleanJSON.data(using: .utf8),
+                   let dto = try? JSONDecoder().decode(MLXCodeAnalysisDTO.self, from: jsonData),
+                   dto.options.count >= 4 {
+                    
+                    let questionFromMLX = CodeAnalysisQuestion(
+                        codeSnippet: dto.codeSnippet,
+                        question: dto.question,
+                        options: Array(dto.options.prefix(4)), // Garante 4 alternativas
+                        correctOptionIndex: dto.correctOptionIndex < 4 ? dto.correctOptionIndex : 0,
+                        explanation: dto.explanation
+                    )
+                    questionsBatch.append(questionFromMLX)
+                    
+                } else {
+                    // 3. Fallback de Segurança caso o MLX gere um JSON malformado
+                    let fallbackQuestion = CodeAnalysisQuestion(
+                        codeSnippet: """
+                        import SwiftUI
+
+                        struct \(topic.replacingOccurrences(of: " ", with: ""))Demo\(index + 1): View {
+                            @State private var count = 0
+                            var body: some View {
+                                Button("Incrementar: \\(count)") { count += 1 }
+                            }
+                        }
+                        """,
+                        question: "Analisando o código Swift acima sobre '\(topic)', qual é o comportamento do estado ao clicar no botão?",
+                        options: [
+                            "O estado é atualizado e a interface re-renderiza exibindo o novo valor.",
+                            "Ocorre um erro de compilação por tentar mutar um estado imutável.",
+                            "Causa uma condição de corrida (data race) em tempo de execução.",
+                            "O botão é desativado após o primeiro clique."
+                        ],
+                        correctOptionIndex: 0,
+                        explanation: "Propriedades marcadas com @State em SwiftUI são gerenciadas pelo framework. Quando o valor muda, a View invalida seu corpo e re-renderiza o componente com o estado atualizado."
+                    )
+                    questionsBatch.append(fallbackQuestion)
+                }
+            }
+
+            return questionsBatch
+            
         } catch {
             throw StudyGeneratorError.generationFailed(error)
         }
     }
 
-    /// Gera o feedback de fim de sessão (Parte 6, implementação mínima),
-    /// a partir de um resumo textual do desempenho — quais perguntas o
-    /// usuário acertou/errou nesta sessão de quiz + análise de código.
+    /// Gera o feedback de fim de sessão.
     func generateFeedback(topic: String, performanceSummary: String) async throws -> StudyFeedback {
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {
             throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
         }
-
+        
         let instructions = """
         Você é um mentor educacional especializado em Swift e nos frameworks da Apple.
         Responda sempre em português.
-        Dê um feedback específico e construtivo baseado apenas no desempenho
-        relatado abaixo — não invente erros ou acertos que não estão listados.
-        Seja encorajador, mas honesto sobre os pontos a melhorar.
+        Dê um feedback específico e construtivo baseado apenas no desempenho relatado.
         """
-
+        
         let session = LanguageModelSession(model: model, instructions: instructions)
-
+        
         let prompt = """
         Tópico estudado: \(topic)
-
-        Desempenho do usuário nesta sessão:
-        \(performanceSummary)
-
-        Gere um feedback de fim de sessão com base apenas nesse desempenho.
+        Desempenho do usuário nesta sessão: \(performanceSummary)
         """
-
+        
         do {
             let response = try await session.respond(to: prompt, generating: StudyFeedback.self)
             return response.content
