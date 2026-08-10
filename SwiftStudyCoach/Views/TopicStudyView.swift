@@ -67,11 +67,39 @@ struct TopicStudyView: View {
     // MARK: - Carregamento
 
     private var loadingState: some View {
-        VStack(spacing: 14) {
-            ProgressView().tint(DS.Colors.violet)
-            Text("Gerando conteúdo de \"\(topicName)\"...")
-                .font(DS.Fonts.body(14))
-                .foregroundStyle(DS.Colors.mist)
+        Group {
+            // MLXService é @Observable — só referenciar `loadState` aqui já
+            // faz essa View reagir automaticamente às mudanças, sem @State
+            // extra. Isso cobre o caso de primeira execução, quando o
+            // download do modelo (alguns GB) pode levar bastante tempo e,
+            // sem esse indicador específico, a tela pareceria travada.
+            if MLXService.shared.loadState == .downloading {
+                VStack(spacing: 12) {
+                    ProgressView().tint(DS.Colors.violet)
+                    Text("Baixando modelo MLX (só na primeira vez — alguns minutos)")
+                        .font(DS.Fonts.body(13))
+                        .foregroundStyle(DS.Colors.mistDim)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+            } else if case .failed(let reason) = MLXService.shared.loadState {
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(DS.Colors.orchid)
+                    Text("Falha ao baixar o modelo MLX: \(reason)")
+                        .font(DS.Fonts.body(13))
+                        .foregroundStyle(DS.Colors.mistDim)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+            } else {
+                VStack(spacing: 14) {
+                    ProgressView().tint(DS.Colors.violet)
+                    Text("Gerando conteúdo de \"\(topicName)\"...")
+                        .font(DS.Fonts.body(14))
+                        .foregroundStyle(DS.Colors.mist)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

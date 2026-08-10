@@ -24,6 +24,7 @@ final class TopicRepository {
     private let targetEasy = 14
     private let targetMedium = 13
     private let targetHard = 13
+    private let targetCodeAnalysis = 13
 
     init(modelContext: ModelContext, generator: StudyGenerator) {
         self.modelContext = modelContext
@@ -102,15 +103,19 @@ final class TopicRepository {
         let summary = try await generator.generateSummary(topic: topic, context: context)
         let flashcards = try await generator.generateFlashcards(topic: topic, context: context)
 
-        // Lote inicial síncrono (usuário espera): 5 fácil + 6 média + 4
-        // difícil = 15, cada dificuldade numa chamada separada — nunca uma
-        // chamada só pedindo 10-15 perguntas variando dificuldade.
+        // Lote inicial síncrono (usuário espera): SÓ fácil + média, que
+        // são 100% Foundation Models — rápido e sem dependência de rede.
+        // Difícil e análise de código passam pelo MLX (download de modelo
+        // na 1ª vez, mais lento, pode falhar por rede) — por isso NÃO
+        // bloqueiam a criação do tópico. Nascem vazios aqui e crescem em
+        // background (ver startBackgroundGrowthIfNeeded / growDifficulty(.hard)
+        // / growCodeAnalysis mais abaixo).
         let easy = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .easy, count: 5)
         let medium = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .medium, count: 6)
-        let hard = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .hard, count: 4)
-        let codeAnalysis = try await generator.generateCodeAnalysisBatch(topic: topic, context: context, count: 4)
 
-        // Só chega aqui (e só insere/salva) se TUDO acima teve sucesso.
+        // Só chega aqui (e só insere/salva) se resumo/flashcards/fácil/média
+        // tiverem sucesso — continua atômico, igual antes, só que sem
+        // esperar o MLX pra isso.
         let studyTopic = StudyTopic(
             name: topic,
             summary: summary.summary,
@@ -118,8 +123,8 @@ final class TopicRepository {
             codeExample: summary.codeExample
         )
         studyTopic.flashcards = flashcards.map { PersistedFlashcard(from: $0) }
-        studyTopic.quizPool = (easy + medium + hard).map { PersistedQuizQuestion(from: $0) }
-        studyTopic.codeAnalysisPool = codeAnalysis.map { PersistedCodeAnalysisQuestion(from: $0) }
+        studyTopic.quizPool = (easy + medium).map { PersistedQuizQuestion(from: $0) }
+        studyTopic.codeAnalysisPool = []
 
         modelContext.insert(studyTopic)
         try modelContext.save()
@@ -160,7 +165,7 @@ final class TopicRepository {
         let topicID = topic.persistentModelID
         let container = modelContext.container
         let generator = self.generator
-        let targets = (easy: targetEasy, medium: targetMedium, hard: targetHard)
+        let targets = (easy: targetEasy, medium: targetMedium, hard: targetHard, codeAnalysis: targetCodeAnalysis)
 
         Task.detached(priority: .background) {
             await TopicRepository.growPoolInBackground(
@@ -183,7 +188,7 @@ final class TopicRepository {
         generator: StudyGenerator,
         topicName: String,
         context: String,
-        targets: (easy: Int, medium: Int, hard: Int)
+        targets: (easy: Int, medium: Int, hard: Int, codeAnalysis: Int)
     ) async {
         let backgroundContext = ModelContext(container)
 
@@ -202,13 +207,27 @@ final class TopicRepository {
                 fetchTopic: fetchTopic, backgroundContext: backgroundContext,
                 generator: generator, topicName: topicName, context: context
             )
+        } catch {
+            print("⚠️ TopicRepository: erro ao crescer pool fácil/média em background para '\(topicName)': \(error)")
+        }
+
+        // Difícil e análise de código passam pelo MLX — isolados num catch
+        // próprio, pra uma falha aqui (ex: sem internet pro download do
+        // modelo) não impedir fácil/média de já terem crescido acima, nem
+        // travar o resto do app.
+        do {
             try await growDifficulty(
                 .hard, target: targets.hard,
                 fetchTopic: fetchTopic, backgroundContext: backgroundContext,
                 generator: generator, topicName: topicName, context: context
             )
+            try await growCodeAnalysis(
+                target: targets.codeAnalysis,
+                fetchTopic: fetchTopic, backgroundContext: backgroundContext,
+                generator: generator, topicName: topicName, context: context
+            )
         } catch {
-            print("⚠️ TopicRepository: erro ao crescer pool em background para '\(topicName)': \(error)")
+            print("⚠️ TopicRepository: erro ao crescer pool difícil/análise de código (MLX) em background para '\(topicName)': \(error)")
         }
 
         // Sucesso ou erro: sempre reverter a flag.
@@ -243,6 +262,35 @@ final class TopicRepository {
 
             guard let topicAgain = fetchTopic() else { return }
             topicAgain.quizPool.append(contentsOf: batch.map { PersistedQuizQuestion(from: $0) })
+            try backgroundContext.save()
+        }
+    }
+
+    /// Faz crescer o pool de análise de código em background — antes desta
+    /// mudança, esse pool só era preenchido uma vez (na geração inicial) e
+    /// nunca mais crescia. Segue o mesmo padrão de growDifficulty.
+    nonisolated private static func growCodeAnalysis(
+        target: Int,
+        fetchTopic: () -> StudyTopic?,
+        backgroundContext: ModelContext,
+        generator: StudyGenerator,
+        topicName: String,
+        context: String
+    ) async throws {
+        while true {
+            guard let topic = fetchTopic() else { return }
+            let currentCount = topic.codeAnalysisPool.count
+            if currentCount >= target { return }
+
+            let batchSize = min(4, target - currentCount)
+            let batch = try await generator.generateCodeAnalysisBatch(
+                topic: topicName,
+                context: context,
+                count: batchSize
+            )
+
+            guard let topicAgain = fetchTopic() else { return }
+            topicAgain.codeAnalysisPool.append(contentsOf: batch.map { PersistedCodeAnalysisQuestion(from: $0) })
             try backgroundContext.save()
         }
     }

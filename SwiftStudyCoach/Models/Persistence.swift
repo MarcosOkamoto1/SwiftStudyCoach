@@ -18,7 +18,7 @@ enum DatasetVersion {
     // `var` (não `let`) de propósito: permite trocar em runtime a partir da
     // tela de teste (TopicRepositoryTestView) para validar a invalidação de
     // cache sem precisar recompilar o app.
-    static var current = "apple-docs-v1"
+    static var current = "apple-docs-v2"
 }
 
 @Model

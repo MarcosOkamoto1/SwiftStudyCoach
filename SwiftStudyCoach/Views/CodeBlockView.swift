@@ -28,11 +28,11 @@ struct CodeBlockView: View {
                     .foregroundStyle(DS.Colors.mistDim)
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(SyntaxHighlighter.highlight(code))
-                    .font(DS.Fonts.mono(13.5))
-                    .lineSpacing(6)
-            }
+            Text(SyntaxHighlighter.highlight(code))
+                .font(DS.Fonts.mono(13.5))
+                .lineSpacing(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
         }
         .padding(22)
         .background(
