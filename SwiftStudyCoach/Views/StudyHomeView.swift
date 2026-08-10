@@ -33,22 +33,7 @@ struct StudyHomeView: View {
                         }
                         .padding(.top, 20)
 
-                        HStack {
-                            TextField("", text: $topicName, prompt: Text("Ex: Guard, Optionals, Actors").foregroundColor(DS.Colors.mistDim))
-                                .font(DS.Fonts.body(16))
-                                .foregroundStyle(DS.Colors.foam)
-                                .padding(14)
-                                .background(RoundedRectangle(cornerRadius: 12).fill(DS.Colors.slate))
-                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.Colors.hairline, lineWidth: 1))
-                        }
-
-                        Button("Estudar") {
-                            let trimmed = topicName.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !trimmed.isEmpty else { return }
-                            navigateTo = trimmed
-                        }
-                        .buttonStyle(DSButtonStyle(accent: DS.Colors.violet, filled: true))
-                        .disabled(topicName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        
 
                         if !topics.isEmpty {
                             sectionLabel("JÁ ESTUDADOS")

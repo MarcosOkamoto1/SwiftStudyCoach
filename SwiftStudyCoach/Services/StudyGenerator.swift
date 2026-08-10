@@ -131,46 +131,88 @@ final class StudyGenerator {
     }
 
     /// Gera perguntas de quiz. Se for Fácil/Média usa Foundation Model; se for Difícil puxa o MLX!
+    // Struct para decodificar o quiz do MLX
+    
+    private struct MLXQuizAnalysisDTO: Decodable {
+        let codeSnippet: String
+        let question: String
+        let options: [String]
+        let correctOptionIndex: Int
+        let explanation: String
+    }
+
     func generateQuizBatch(topic: String, context: String, difficulty: Difficulty, count: Int) async throws -> [QuizQuestion] {
         
-        // 🔀 SE FOR DIFÍCIL: Processa via MLX Local com higienização estrita
+        // 🔀 SE FOR DIFÍCIL: Processa via MLX Local com formato JSON
         if difficulty == .hard {
             try await MLXService.shared.loadModel()
             
             let ragContext = context.isEmpty ? ((try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? "") : context
             
+            // Alterado para pedir JSON assim como no quiz de código
             let mlxPrompt = """
-            Você é um especialista em Swift. Crie UMA pergunta técnica de nível avançado sobre '\(topic)'.
-            Contexto oficial: \(ragContext)
+            Você é um especialista em Swift. Crie UMA pergunta técnica de múltipla escolha de nível AVANÇADO sobre '\(topic)'.
 
-            Responda APENAS com o texto direto e claro da pergunta em português. Não inclua JSON, nem opções de resposta.
+            [Contexto RAG]:
+            \(ragContext.isEmpty ? "Conhecimento geral sobre Swift." : ragContext)
+
+            [Instruções de Saída]:
+            Retorne APENAS um objeto JSON válido (sem textos em volta) exatamente neste formato:
+            {
+              "question": "Apenas o enunciado da pergunta sem listar alternativas aqui",
+              "options": ["Opção A", "Opção B", "Opção C", "Opção D"],
+              "correctOptionIndex": 0,
+              "explanation": "Explicação técnica detalhada da resposta."
+            }
             """
             
-            let draft = try await MLXService.shared.generateQuestionDraft(promptContext: mlxPrompt)
+            let rawDraft = try await MLXService.shared.generateQuestionDraft(promptContext: mlxPrompt)
             
-            let cleanQuestion = draft
+            // 1. Limpeza de marcadores de código Markdown
+            var cleanJSON = rawDraft
                 .replacingOccurrences(of: "```json", with: "")
                 .replacingOccurrences(of: "```swift", with: "")
                 .replacingOccurrences(of: "```", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             
-            let hardQuestion = QuizQuestion(
-                difficulty: difficulty,
-                question: cleanQuestion.isEmpty ? "Qual é o comportamento esperado ao trabalhar com concorrência avançada em \(topic)?" : cleanQuestion,
-                options: [
-                    "Executa com sucesso garantindo o isolamento de estado do ator",
-                    "Gera um erro de compilação por violação de regras de Concurrency",
-                    "Provoca uma condição de corrida (data race) em tempo de execução",
-                    "Causa um vazamento de memória devido a referência circular"
-                ],
-                correctOptionIndex: 0,
-                explanation: "Pergunta avançada gerada pelo MLX com base na documentação oficial de \(topic)."
-            )
+            if let firstBrace = cleanJSON.firstIndex(of: "{"),
+               let lastBrace = cleanJSON.lastIndex(of: "}") {
+                cleanJSON = String(cleanJSON[firstBrace...lastBrace])
+            }
             
-            return [hardQuestion]
+            // 2. Tenta fazer o parse do JSON do MLX
+            if let jsonData = cleanJSON.data(using: .utf8),
+               let dto = try? JSONDecoder().decode(MLXQuizAnalysisDTO.self, from: jsonData),
+               dto.options.count >= 4 {
+                
+                let hardQuestion = QuizQuestion(
+                    difficulty: difficulty,
+                    question: dto.question,
+                    options: Array(dto.options.prefix(4)),
+                    correctOptionIndex: dto.correctOptionIndex < 4 ? dto.correctOptionIndex : 0,
+                    explanation: dto.explanation
+                )
+                return [hardQuestion]
+                
+            } else {
+                // 3. Fallback de segurança se o JSON falhar
+                let fallbackQuestion = QuizQuestion(
+                    difficulty: difficulty,
+                    question: "Qual é o comportamento esperado ao trabalhar com concorrência avançada e isolamento de estado em \(topic)?",
+                    options: [
+                        "Executa com sucesso garantindo o isolamento de estado do ator",
+                        "Gera um erro de compilação por violação de regras de Concurrency",
+                        "Provoca uma condição de corrida (data race) em tempo de execução",
+                        "Causa um vazamento de memória devido a referência circular"
+                    ],
+                    correctOptionIndex: 0,
+                    explanation: "Pergunta avançada sobre isolamento de estado em Swift."
+                )
+                return [fallbackQuestion]
+            }
         }
         
-        // Usar o Foundation Model para Fácil e Média
+        // Usar o Foundation Model para Fácil e Média...
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {
             throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
@@ -210,13 +252,7 @@ final class StudyGenerator {
         }
     }
 
-    private struct MLXCodeAnalysisDTO: Decodable {
-        let codeSnippet: String
-        let question: String
-        let options: [String]
-        let correctOptionIndex: Int
-        let explanation: String
-    }
+
 
     /// Gera um lote de perguntas de análise de código (100% dinâmico via MLX + JSON structured output)
     func generateCodeAnalysisBatch(topic: String, context: String, count: Int = 5) async throws -> [CodeAnalysisQuestion] {
@@ -263,7 +299,7 @@ final class StudyGenerator {
                 
                 // 2. Tenta fazer o parse do JSON retornado pelo MLX
                 if let jsonData = cleanJSON.data(using: .utf8),
-                   let dto = try? JSONDecoder().decode(MLXCodeAnalysisDTO.self, from: jsonData),
+                   let dto = try? JSONDecoder().decode(MLXQuizAnalysisDTO.self, from: jsonData),
                    dto.options.count >= 4 {
                     
                     let questionFromMLX = CodeAnalysisQuestion(
