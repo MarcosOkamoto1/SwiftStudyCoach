@@ -143,7 +143,7 @@ final class StudyGenerator {
 
     func generateQuizBatch(topic: String, context: String, difficulty: Difficulty, count: Int) async throws -> [QuizQuestion] {
         
-        // 🔀 SE FOR DIFÍCIL: Processa via MLX Local com formato JSON
+        // SE FOR DIFÍCIL: Processa via MLX Local com formato JSON
         if difficulty == .hard {
             try await MLXService.shared.loadModel()
             
@@ -168,7 +168,7 @@ final class StudyGenerator {
             
             let rawDraft = try await MLXService.shared.generateQuestionDraft(promptContext: mlxPrompt)
             
-            // 1. Limpeza de marcadores de código Markdown
+            
             var cleanJSON = rawDraft
                 .replacingOccurrences(of: "```json", with: "")
                 .replacingOccurrences(of: "```swift", with: "")
@@ -180,7 +180,7 @@ final class StudyGenerator {
                 cleanJSON = String(cleanJSON[firstBrace...lastBrace])
             }
             
-            // 2. Tenta fazer o parse do JSON do MLX
+            
             if let jsonData = cleanJSON.data(using: .utf8),
                let dto = try? JSONDecoder().decode(MLXQuizAnalysisDTO.self, from: jsonData),
                dto.options.count >= 4 {
@@ -195,7 +195,6 @@ final class StudyGenerator {
                 return [hardQuestion]
                 
             } else {
-                // 3. Fallback de segurança se o JSON falhar
                 let fallbackQuestion = QuizQuestion(
                     difficulty: difficulty,
                     question: "Qual é o comportamento esperado ao trabalhar com concorrência avançada e isolamento de estado em \(topic)?",
