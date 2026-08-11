@@ -48,6 +48,25 @@ final class MLXService {
     /// Linha separadora usada nos prompts/parse de geração em lote.
     static let itemSeparator = "====="
 
+    /// Pasta local opcional com os pesos já baixados manualmente (ex: via
+    /// `hf download mlx-community/... --local-dir ~/mlx-models/...`, bem
+    /// mais rápido que o downloader do swift-transformers — ver Plano V5).
+    /// Se essa pasta existir e tiver pesos de verdade, `performLoad` carrega
+    /// direto dela via `ModelConfiguration(directory:)`, sem rede e sem
+    /// passar pelo HubApi. Caminho pessoal desta máquina de desenvolvimento;
+    /// em qualquer outra máquina (ou se a pasta for apagada) a pasta
+    /// simplesmente não existe e o app cai automaticamente pro download
+    /// normal via `modelID` — não quebra nada pra ninguém mais.
+    private static var localModelOverrideDirectory: URL? {
+        let path = ("~/mlx-models/qwen3-coder-30b-a3b" as NSString).expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: path)
+        return directoryContainsSafetensors(url) ? url : nil
+    }
+
     /// Estado observável do carregamento/download do modelo MLX. A UI
     /// (ModelDownloadView) observa isso pra mostrar progresso, velocidade
     /// e tempo estimado na primeira execução.
@@ -106,7 +125,13 @@ final class MLXService {
         downloadSpeedBytesPerSecond = nil
         downloadETASeconds = nil
 
-        let modelConfiguration = ModelConfiguration(id: Self.modelID)
+        let modelConfiguration: ModelConfiguration
+        if let localDir = Self.localModelOverrideDirectory {
+            print("🟢 MLXService: pesos locais encontrados em \(localDir.path) — carregando direto, sem download.")
+            modelConfiguration = ModelConfiguration(directory: localDir)
+        } else {
+            modelConfiguration = ModelConfiguration(id: Self.modelID)
+        }
 
         print("Carregando modelo MLX (\(Self.modelID))...")
         do {
@@ -204,22 +229,34 @@ final class MLXService {
     // MARK: - Pré-aquecimento (Plano V3 4.3)
 
     /// Verifica, só com FileManager (SEM rede), se os pesos do modelo já
-    /// parecem estar baixados no cache local do swift-transformers
-    /// (`Documents/huggingface/models/...`, ver HubApi). Heurística
-    /// conservadora: só considera "em cache" se encontrar pelo menos um
-    /// arquivo `.safetensors` de verdade dentro do diretório esperado —
-    /// só o diretório existir (ou só um config.json) não é garantia de
-    /// download completo, e um falso positivo aqui dispararia download
-    /// não solicitado, exatamente o que este item do plano proíbe.
-    /// Checa tanto o layout aninhado (`models/<org>/<repo>`) quanto o
-    /// layout achatado ao estilo Python (`models/<org>--<repo>`), já que
-    /// a documentação do swift-transformers não fixa qual dos dois é
-    /// usado em toda versão.
+    /// parecem estar baixados no cache local usado pelo `MLXLMCommon`
+    /// (`~/Library/Caches/huggingface/models/...`). Heurística conservadora:
+    /// só considera "em cache" se encontrar pelo menos um arquivo
+    /// `.safetensors` de verdade dentro do diretório esperado — só o
+    /// diretório existir (ou só um config.json) não é garantia de download
+    /// completo, e um falso positivo aqui dispararia download não
+    /// solicitado, exatamente o que este item do plano proíbe.
+    ///
+    /// ⚠️ Bug corrigido (Plano V5): esta função checava `Documents/...`,
+    /// mas `MLXService.performLoad` chama `LLMModelFactory.shared.
+    /// loadContainer` SEM passar um `hub:` customizado — então quem baixa de
+    /// verdade é o `defaultHubApi` do MLXLMCommon, que usa
+    /// `.cachesDirectory`, não `.documentDirectory` (confirmado lendo o
+    /// source do MLXLMCommon/Load.swift). Com o path errado, esta função
+    /// NUNCA detectava o modelo como já baixado — o pré-aquecimento em
+    /// background no launch (`prewarmIfCached`) silenciosamente não fazia
+    /// nada mesmo com o modelo 100% baixado (o carregamento normal via
+    /// `loadModel()` continuava funcionando, só perdia a otimização).
+    ///
+    /// Checa 3 layouts candidatos, já que a forma exata como o HubApi
+    /// grava o nome da pasta do repo (`org/repo` aninhado, `org--repo`
+    /// achatado, ou `org%2Frepo` com a barra percent-encoded por
+    /// `URL.appending(component:)`) não está 100% documentada nesta versão.
     static func isModelLikelyCached() -> Bool {
-        guard let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+        guard let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
             return false
         }
-        let modelsRoot = documentsDir.appendingPathComponent("huggingface", isDirectory: true).appendingPathComponent("models", isDirectory: true)
+        let modelsRoot = cachesDir.appendingPathComponent("huggingface", isDirectory: true).appendingPathComponent("models", isDirectory: true)
 
         let components = modelID.split(separator: "/").map(String.init)
         guard components.count == 2 else { return false }
@@ -228,6 +265,7 @@ final class MLXService {
         let candidateDirs = [
             modelsRoot.appendingPathComponent(org, isDirectory: true).appendingPathComponent(repo, isDirectory: true),
             modelsRoot.appendingPathComponent("\(org)--\(repo)", isDirectory: true),
+            modelsRoot.appendingPathComponent("\(org)%2F\(repo)", isDirectory: true),
         ]
 
         return candidateDirs.contains { directoryContainsSafetensors($0) }
