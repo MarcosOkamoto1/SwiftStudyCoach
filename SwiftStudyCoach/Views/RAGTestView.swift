@@ -14,10 +14,16 @@ import SwiftUI
 
 struct RAGTestView: View {
     private let index = DocumentIndex.shared
-    @State private var query: String = "o que é optional binding"
+    @State private var query: String = "Property Wrappers"
     @State private var results: [(chunk: DocChunk, similarity: Double)] = []
     @State private var errorMessage: String?
     @State private var debugMode: Bool = true
+    /// Plano V5: por padrão testa o MESMO caminho usado em produção
+    /// (`hybridSearch` — cosseno + léxico + boost de tópico). Desligar
+    /// volta pra busca semântica pura (só cosseno), útil só pra comparar e
+    /// entender o quanto o cosseno sozinho é pouco discriminativo nesse
+    /// domínio (ver comentário em DocumentIndex.hybridSearch).
+    @State private var useHybridSearch: Bool = true
 
     var body: some View {
         Form {
@@ -34,8 +40,11 @@ struct RAGTestView: View {
             }
 
             Section("Query de teste") {
-                TextField("Ex: o que é optional binding", text: $query)
-                Toggle("Modo debug (sem threshold)", isOn: $debugMode)
+                TextField("Ex: Property Wrappers, async/await, NavigationStack", text: $query)
+                Toggle("Busca híbrida (produção: cosseno + léxico + boost de tópico)", isOn: $useHybridSearch)
+                if !useHybridSearch {
+                    Toggle("Modo debug (sem threshold)", isOn: $debugMode)
+                }
                 Button("Buscar") {
                     Task { await runSearch() }
                 }
@@ -86,13 +95,21 @@ struct RAGTestView: View {
     private func runSearch() async {
         errorMessage = nil
         do {
-            let threshold: Double? = debugMode ? nil : 0.50
-            results = try await index.search(
-                query: query,
-                minimumSimilarity: threshold
-            )
-            if results.isEmpty {
-                errorMessage = "Nenhum resultado acima do threshold de similaridade — tente reduzir minimumSimilarity ou reformular a query."
+            if useHybridSearch {
+                let ranked = try await index.hybridSearch(query: query, topK: 3)
+                results = ranked.map { (chunk: $0.chunk, similarity: $0.score) }
+                if results.isEmpty {
+                    errorMessage = "Nenhum resultado — hybridSearch não achou nada acima do threshold adaptativo interno (0.45, relaxando pra 0.30 com sinal léxico/tópico)."
+                }
+            } else {
+                let threshold: Double? = debugMode ? nil : 0.50
+                results = try await index.search(
+                    query: query,
+                    minimumSimilarity: threshold
+                )
+                if results.isEmpty {
+                    errorMessage = "Nenhum resultado acima do threshold de similaridade — tente reduzir minimumSimilarity ou reformular a query."
+                }
             }
         } catch {
             errorMessage = "Erro na busca: \(error.localizedDescription)"

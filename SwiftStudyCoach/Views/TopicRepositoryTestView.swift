@@ -102,7 +102,7 @@ struct TopicRepositoryTestView: View {
 
     private var loadTopicSection: some View {
         Section("1) Gerar / carregar tópico (checklist itens 1, 5, 6)") {
-            TextField("Tópico (ex: Guard, Optionals, async/await)", text: $topicName)
+            TextField("Tópico (ex: NavigationStack, Property Wrappers, async/await)", text: $topicName)
 
             Button {
                 Task { await loadTopic() }
