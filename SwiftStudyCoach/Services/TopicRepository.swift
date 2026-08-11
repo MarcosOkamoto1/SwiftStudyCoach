@@ -21,6 +21,17 @@ final class TopicRepository {
     private let modelContext: ModelContext
     private let generator: StudyGenerator
 
+    /// Deduplicação de geração em andamento por nome de tópico (Plano V5,
+    /// hotfix pós-teste real): sem isso, reabrir/recarregar a tela do MESMO
+    /// tópico antes da 1ª geração terminar e persistir fazia fetchOrCreate
+    /// checar "sem cache" de novo e disparar uma SEGUNDA geração completa
+    /// inteira em paralelo (visto ao vivo: "generateAndPersist CHAMADO"
+    /// duas vezes pro mesmo tópico) — as duas competiam pela mesma fila do
+    /// GenerationOrchestrator, dobrando o trabalho e parecendo travado.
+    /// Mesmo padrão de Task compartilhada já usado em MLXService.loadModel
+    /// e DocumentIndex.ensureReady.
+    private var inFlightGenerations: [String: Task<StudyTopic, Error>] = [:]
+
     // Tamanho alvo do pool de quiz por dificuldade (24 no total — Plano V3
     // 1.1: cortado de 53 pra 24, ~2 sessões sem repetição perceptível antes
     // do top-up pós-sessão (ver replenishAfterSession) entrar em ação).
@@ -50,7 +61,7 @@ final class TopicRepository {
                     print("🟠 fetchOrCreate: '\(topic)' está em cache mas com quizPool vazio — tratando como quebrado, regenerando.")
                     modelContext.delete(existing)
                     try modelContext.save()
-                    return try await generateAndPersist(topic: topic)
+                    return try await generateAndPersistDeduped(topic: topic)
                 }
                 print("🟢 fetchOrCreate: cache HIT para '\(topic)' (dataset '\(existing.sourceDatasetVersion)') — nenhuma chamada ao Foundation Models.")
 
@@ -81,7 +92,7 @@ final class TopicRepository {
         } else {
             print("⚪️ fetchOrCreate: nenhum cache para '\(topic)' — gerando do zero.")
         }
-        return try await generateAndPersist(topic: topic)
+        return try await generateAndPersistDeduped(topic: topic)
     }
 
     /// Sorteia 3 fáceis + 4 médias + 3 difíceis do pool já existente —
@@ -104,6 +115,21 @@ final class TopicRepository {
         var descriptor = FetchDescriptor<StudyTopic>(predicate: #Predicate { $0.name == topic })
         descriptor.fetchLimit = 1
         return try modelContext.fetch(descriptor).first
+    }
+
+    /// Envolve `generateAndPersist` com deduplicação por tópico (ver
+    /// comentário de `inFlightGenerations`): se já existe uma geração em
+    /// andamento pro MESMO nome, a chamada nova aguarda a MESMA Task em vez
+    /// de disparar um ciclo completo de geração duplicado.
+    private func generateAndPersistDeduped(topic: String) async throws -> StudyTopic {
+        if let existingTask = inFlightGenerations[topic] {
+            print("🟡 fetchOrCreate: geração já em andamento para '\(topic)' — aguardando a MESMA Task em vez de duplicar.")
+            return try await existingTask.value
+        }
+        let task = Task { try await generateAndPersist(topic: topic) }
+        inFlightGenerations[topic] = task
+        defer { inFlightGenerations[topic] = nil }
+        return try await task.value
     }
 
     private func generateAndPersist(topic: String) async throws -> StudyTopic {
