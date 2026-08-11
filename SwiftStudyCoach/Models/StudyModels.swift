@@ -31,7 +31,7 @@ struct TopicSummary {
 ///    prompt pedindo "comente o código" era frequentemente ignorada.
 @Generable
 struct ExplainedCodeExample {
-    @Guide(description: "Código Swift completo e compilável do exemplo, 5-15 linhas, SEM comentários (a explicação vai no walkthrough)")
+    @Guide(description: "Código Swift completo e compilável do exemplo, 5-15 linhas, SEM comentários (a explicação vai no walkthrough). CADA linha do código separada por uma quebra de linha real (\\n) — nunca uma única linha corrida sem formatação.")
     var code: String
 
     @Guide(description: "Explicação passo a passo do código acima: entre 3 e 5 passos, um por bloco relevante, na ordem em que aparecem, em português, como se ensinasse alguém vendo aquilo pela primeira vez")
@@ -78,7 +78,7 @@ struct QuizQuestionBatch {
 
 @Generable
 struct CodeAnalysisQuestion {
-    @Guide(description: "Trecho de código Swift (5-15 linhas) para o usuário analisar")
+    @Guide(description: "Trecho de código Swift (5-15 linhas) para o usuário analisar. CADA linha separada por uma quebra de linha real (\\n) — nunca uma única linha corrida sem formatação.")
     var codeSnippet: String
 
     @Guide(description: "Pergunta sobre o comportamento, saída ou problema do trecho de código acima")

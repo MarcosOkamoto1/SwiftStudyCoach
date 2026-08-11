@@ -338,14 +338,20 @@ final class StudyGenerator {
                 já com as correções da revisão aplicadas.
                 """
 
-                let options = GenerationOptions(maximumResponseTokens: 1100)
+                // Plano V5, hotfix pós-teste: 1100 tokens não bastava pro código
+                // + passo a passo de 3-5 etapas em português (mais verboso que
+                // inglês em tokens) — visto ao vivo o código cortado mesmo
+                // DEPOIS do retry "8 linhas". Subiu o orçamento e o retry agora
+                // também pede um walkthrough mais curto, não só código curto,
+                // já que os dois competem pelo mesmo orçamento de tokens.
+                let options = GenerationOptions(maximumResponseTokens: 1600)
                 let response = try await session.respond(to: prompt, generating: ExplainedCodeExample.self, options: options)
                 let example = response.content
 
                 if Self.looksTruncated(example.code) {
                     print("⚠️ [formatação do exemplo de código] código parece truncado — retry pedindo versão mais curta.")
                     let retrySession = LanguageModelSession(model: model, instructions: instructions)
-                    let retryPrompt = prompt + "\n\nIMPORTANTE: mantenha NO MÁXIMO 8 linhas de código."
+                    let retryPrompt = prompt + "\n\nIMPORTANTE: mantenha NO MÁXIMO 8 linhas de código E NO MÁXIMO 3 passos curtos no walkthrough."
                     let retry = try await retrySession.respond(to: retryPrompt, generating: ExplainedCodeExample.self, options: options)
                     if !Self.looksTruncated(retry.content.code) {
                         return retry.content
@@ -436,7 +442,9 @@ final class StudyGenerator {
                 // Precisa ser generoso: o walkthrough REPETE os trechos do código
                 // (snippet + explicação por passo), então a resposta é ~2x o
                 // tamanho do código em si.
-                let options = GenerationOptions(maximumResponseTokens: 1100)
+                // Plano V5: mesmo orçamento maior e retry com walkthrough mais
+                // curto do formatCodeExample — ver comentário lá.
+                let options = GenerationOptions(maximumResponseTokens: 1600)
                 let response = try await session.respond(to: prompt, generating: ExplainedCodeExample.self, options: options)
                 let example = response.content
 
@@ -446,7 +454,7 @@ final class StudyGenerator {
                 if Self.looksTruncated(example.code) {
                     print("⚠️ [exemplo de código] código parece truncado — retry pedindo exemplo mais curto.")
                     let retrySession = LanguageModelSession(model: model, instructions: instructions)
-                    let retryPrompt = prompt + "\n\nIMPORTANTE: o exemplo deve ter NO MÁXIMO 8 linhas de código."
+                    let retryPrompt = prompt + "\n\nIMPORTANTE: o exemplo deve ter NO MÁXIMO 8 linhas de código E NO MÁXIMO 3 passos curtos no walkthrough."
                     let retry = try await retrySession.respond(to: retryPrompt, generating: ExplainedCodeExample.self, options: options)
                     if !Self.looksTruncated(retry.content.code) {
                         return retry.content
@@ -603,6 +611,8 @@ final class StudyGenerator {
     - Button, Toggle, NavigationLink e afins que recebem uma ação/closure NUNCA podem ficar sem ela —
       `Button("Título")` sozinho NÃO COMPILA, precisa de `action:` ou closure à direita.
     - `.navigationDestination(for:)` espera um TIPO (ex.: `Int.self`), nunca um valor literal.
+    - `NavigationPath`, `Bool`, `Int`, `String` e outros tipos de VALOR (não-classe) usam `@State`, nunca
+      `@StateObject` — `@StateObject` só serve pra tipos que conformam `ObservableObject`/`@Observable`.
     - Todo parâmetro de inicializador usado precisa existir de verdade no tipo (não invente).
     - O walkthrough/explicação NUNCA pode descrever uma mudança que não está de fato no código final —
       se a explicação diz que algo foi ajustado, o código tem que refletir exatamente isso.
@@ -826,11 +836,30 @@ final class StudyGenerator {
         // Mesmo esquema de retry do formatHardQuestion (ver comentário lá) —
         // rede de segurança pra falhas reais do modelo, já não pra
         // contenção FM/MLX, que a fila do GenerationOrchestrator elimina.
+        //
+        // Plano V5, hotfix pós-teste: faltava aqui o MESMO
+        // looksTruncated + retry-mais-curto que já existia em
+        // formatCodeExample — visto ao vivo um codeSnippet cortado no meio
+        // (terminando em "NavigationLink(" sem fechar) passando batido.
+        // maximumResponseTokens também estava usando o default implícito
+        // (sem opções), agora fixado explicitamente com folga.
         for attempt in 1...3 {
             do {
+                let options = GenerationOptions(maximumResponseTokens: 900)
                 let formatted = try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
                     let session = LanguageModelSession(model: model, instructions: formatterInstructions)
-                    return try await session.respond(to: formatterPrompt, generating: CodeAnalysisQuestion.self)
+                    return try await session.respond(to: formatterPrompt, generating: CodeAnalysisQuestion.self, options: options)
+                }
+                if Self.looksTruncated(formatted.content.codeSnippet) {
+                    print("⚠️ [análise de código] codeSnippet parece truncado — retry pedindo versão mais curta.")
+                    let retrySession = LanguageModelSession(model: model, instructions: formatterInstructions)
+                    let retryPrompt = formatterPrompt + "\n\nIMPORTANTE: mantenha o codeSnippet com NO MÁXIMO 8 linhas de código."
+                    let retry = try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                        try await retrySession.respond(to: retryPrompt, generating: CodeAnalysisQuestion.self, options: options)
+                    }
+                    if !Self.looksTruncated(retry.content.codeSnippet) {
+                        return retry.content
+                    }
                 }
                 return formatted.content
             } catch {
