@@ -29,7 +29,7 @@ struct TopicRepositoryTestView: View {
     @State private var isSettingUp = false
     @State private var setupError: String?
 
-    @State private var topicName: String = "Guard"
+    @State private var topicName: String = "NavigationStack"
     @State private var isLoading = false
     @State private var loadErrorMessage: String?
     @State private var loadedTopicID: PersistentIdentifier?
@@ -39,7 +39,7 @@ struct TopicRepositoryTestView: View {
     @State private var sampleB: [PersistedQuizQuestion] = []
     @State private var log: [String] = []
 
-    @State private var raceTestTopicName: String = "Protocolos"
+    @State private var raceTestTopicName: String = "Property Wrappers"
     @State private var raceTestResult: String?
     @State private var raceTestRunning = false
 

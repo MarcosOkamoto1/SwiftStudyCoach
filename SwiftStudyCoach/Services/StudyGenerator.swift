@@ -219,9 +219,9 @@ final class StudyGenerator {
                     """
                 }
 
-                // Sem o codeExample no schema, 500 tokens são folgados para
-                // resumo (~100-150 palavras) + 2-3 pontos-chave.
-                let options = GenerationOptions(maximumResponseTokens: 500)
+                // Resumo mais longo (180-280 palavras, Plano V5) + 3-5 pontos-chave
+                // precisa de mais orçamento que os 500 tokens antigos (100-150 palavras).
+                let options = GenerationOptions(maximumResponseTokens: 750)
                 let response = try await session.respond(to: prompt, generating: TopicSummary.self, options: options)
                 return response.content
             }
@@ -277,16 +277,18 @@ final class StudyGenerator {
     /// no schema ExplainedCodeExample via Foundation Models, reaproveitando
     /// o `looksTruncated` + retry curto que já existia pro exemplo de código.
     ///
-    /// Hotfix pós-teste: a instrução anterior pedia pra FM preservar o
-    /// rascunho "fielmente, sem inventar informação nova" — isso fazia a
-    /// formatação simplesmente HERDAR qualquer alucinação do MLX (ex.:
-    /// `Navigation.push(...)`, que não existe, ou `.navigationBarTitle`,
-    /// deprecado desde o NavigationStack) sem chance de correção, porque
-    /// nem o contexto RAG chegava até aqui. Agora `formatCodeExample`
-    /// recebe o `context` (mesmo grounding usado pra gerar o rascunho) e a
-    /// instrução vira CORRETIVA: o contexto documentado é a fonte de
-    /// verdade, e qualquer API do rascunho que não exista ou contradiga o
-    /// contexto deve ser substituída pela forma real/atual.
+    /// Hotfix pós-teste (2ª rodada): a 1ª versão desse método já tentava
+    /// corrigir o rascunho contra o contexto RAG numa ÚNICA passada, mas
+    /// pedir pra um modelo pequeno criticar tecnicamente E reformatar pro
+    /// schema estruturado ao mesmo tempo sobrecarrega ele — testes reais
+    /// continuaram mostrando erros de tipo/sintaxe reais passando batido
+    /// (ex.: `.navigationDestination(for: 1)` em vez de `for: Int.self`,
+    /// `ContentView(selection:)` com um parâmetro que não existe). Agora
+    /// vira DUAS passadas: `critiqueCodeDraft` aponta os erros técnicos em
+    /// texto livre (tarefa mais estreita, mais fácil pro modelo acertar) e
+    /// só DEPOIS `formatCodeExample` reformata pro schema aplicando essa
+    /// crítica — o mesmo padrão "critique, depois corrija" que funciona
+    /// bem em revisão de código por humanos.
     private func formatCodeExample(draft: String, topic: String, context: String, priority: GenerationOrchestrator.Priority) async throws -> ExplainedCodeExample {
         let cleanDraft = Self.sanitizeDraft(draft)
         guard !cleanDraft.isEmpty else {
@@ -297,17 +299,24 @@ final class StudyGenerator {
         }
         let model = try requireModel()
 
+        let critique = try await critiqueCodeDraft(draft: cleanDraft, topic: topic, context: context, priority: priority)
+        print("🔵 [exemplo de código] crítica técnica: \(critique.prefix(200))\(critique.count > 200 ? "…" : "")")
+
         let instructions = """
-        Você recebe um rascunho com um código Swift e sua explicação passo a passo, gerado por outro modelo —
-        esse rascunho PODE conter erros técnicos: APIs que não existem, métodos/modificadores deprecados,
-        ou padrões de outras linguagens/frameworks confundidos com Swift.
-        Sua tarefa é reformatar isso num exemplo de código explicado, usando o contexto de documentação oficial
-        fornecido como FONTE DE VERDADE: se o rascunho usar uma API que não existe, que diverge do contexto,
-        ou que está deprecada em favor de outra mostrada no contexto, CORRIJA para a forma real e atual —
-        não preserve um erro técnico só por fidelidade ao rascunho.
+        Você recebe um rascunho com um código Swift e sua explicação passo a passo, gerado por outro modelo,
+        e uma REVISÃO TÉCNICA desse rascunho feita por um segundo revisor, apontando erros reais (ou dizendo
+        que não há erros).
+        Sua tarefa é reformatar o rascunho num exemplo de código explicado, aplicando TODAS as correções da
+        revisão técnica — se a revisão apontou um erro, o código final NÃO PODE conter esse erro. Se a revisão
+        disse que não há erros, apenas reformate normalmente.
+        Use o contexto de documentação oficial fornecido como fonte de verdade adicional: qualquer API que
+        não exista ou contradiga o contexto também deve ser corrigida, mesmo que a revisão não tenha pego.
         Nunca invente um nome de método, tipo ou modificador que você não tem certeza que existe.
-        Preserve a intenção didática do rascunho (o conceito que ele tenta ilustrar) e, quando o código
-        já estiver correto, o código em si — mas o resultado final precisa ser Swift real e compilável.
+        Preserve a intenção didática do rascunho (o conceito que ele tenta ilustrar), mas o resultado final
+        precisa ser Swift real e compilável.
+
+        \(Self.commonCodeMistakesChecklist)
+
         Responda sempre em português.
         """
 
@@ -322,8 +331,11 @@ final class StudyGenerator {
                 Rascunho gerado por outro modelo sobre '\(topic)':
                 \(cleanDraft)
 
-                Reformate esse rascunho no exemplo de código explicado, com o walkthrough passo a passo.
-                Se o rascunho contradisser o contexto acima, o contexto vence.
+                Revisão técnica do rascunho acima (aplique TODAS as correções apontadas aqui):
+                \(critique)
+
+                Reformate esse rascunho no exemplo de código explicado, com o walkthrough passo a passo,
+                já com as correções da revisão aplicadas.
                 """
 
                 let options = GenerationOptions(maximumResponseTokens: 1100)
@@ -340,6 +352,54 @@ final class StudyGenerator {
                     }
                 }
                 return example
+            }
+        }
+    }
+
+    /// Passada 1 do hotfix de 2 passadas (ver `formatCodeExample`): pede pra
+    /// Foundation Models APENAS criticar o rascunho — sem formatar, sem
+    /// gerar código novo — comparando contra o contexto oficial. Tarefa
+    /// mais estreita que "reformatar + corrigir" ao mesmo tempo, então o
+    /// modelo tende a pegar erros de tipo/API mais concretos (ex.:
+    /// `.navigationDestination(for:)` esperando um `Tipo.self`, não um
+    /// valor). Resposta em texto livre, sem schema (`respond(to:options:)`,
+    /// sem `generating:`) — mais barato e não trava numa estrutura rígida
+    /// pra uma lista curta de apontamentos.
+    private func critiqueCodeDraft(draft: String, topic: String, context: String, priority: GenerationOrchestrator.Priority) async throws -> String {
+        let model = try requireModel()
+
+        let instructions = """
+        Você é um revisor de código Swift rigoroso. Sua ÚNICA tarefa é apontar erros técnicos REAIS
+        no rascunho de código abaixo — não reescreva o código, só liste os problemas.
+        Procure especificamente por: APIs que não existem, uso incorreto de uma API real (ex.: passar um
+        valor onde a API espera um TIPO, como em navigationDestination(for:), que exige Tipo.self e não
+        um valor literal; ou um parâmetro de inicializador que o tipo não declara), métodos/modificadores
+        deprecados, e qualquer contradição com o contexto de documentação oficial fornecido.
+
+        \(Self.commonCodeMistakesChecklist)
+
+        Se não encontrar nenhum erro real, responda exatamente "OK - sem erros".
+        Seja específico (cite o trecho exato) e conciso — no máximo 5 pontos.
+        Responda sempre em português.
+        """
+
+        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+            try await self.withDiagnostics(step: "crítica do exemplo de código", context: context) { ctx in
+                let session = LanguageModelSession(model: model, instructions: instructions)
+
+                let prompt = """
+                Contexto da documentação oficial:
+                \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
+
+                Rascunho de código Swift sobre '\(topic)':
+                \(draft)
+
+                Liste os erros técnicos reais encontrados no rascunho acima (ou "OK - sem erros").
+                """
+
+                let options = GenerationOptions(maximumResponseTokens: 350)
+                let response = try await session.respond(to: prompt, options: options)
+                return response.content
             }
         }
     }
@@ -443,7 +503,10 @@ final class StudyGenerator {
             try await MLXService.shared.loadModel()
 
             // Plano V4 Fase 4: contexto via busca exata por tópico (nunca fuzzy).
-            let ragContext = await retrieveContext(for: topic, topK: 1)
+            // Plano V5: topK 3 — dataset atual tem no máximo 3 chunks por tópico,
+            // então isso sempre pega o tópico inteiro (sem inconsistência de
+            // quanto contexto cada chamada usa).
+            let ragContext = await retrieveContext(for: topic, topK: 3)
 
             let mlxPrompt = """
             Você é um especialista em Swift. Crie \(count) perguntas técnicas de nível avançado sobre '\(topic)', distintas entre si.
@@ -494,6 +557,8 @@ final class StudyGenerator {
         Responda sempre em português.
         Baseie-se PRINCIPALMENTE no contexto de documentação fornecido.
         Gere perguntas de múltipla escolha com exatamente 4 alternativas, sendo apenas uma correta.
+        As alternativas NUNCA devem ter prefixo de letra ou número (nunca "A)", "B.", "1)" etc.) —
+        escreva só o texto puro de cada alternativa, a interface já numera sozinha.
         """
 
         let fewShot = """
@@ -527,6 +592,21 @@ final class StudyGenerator {
             }
         }
     }
+
+    /// Checklist de erros concretos vistos em teste real, reaproveitado nas
+    /// instruções de crítica/formatação de código (exemplo E análise) —
+    /// pedir "corrija erros" de forma genérica não pegou casos como
+    /// `Button("título")` sem action (não compila) ou walkthrough
+    /// descrevendo uma mudança que não foi de fato aplicada ao código.
+    private static let commonCodeMistakesChecklist = """
+    Erros comuns pra verificar item a item antes de aceitar o código:
+    - Button, Toggle, NavigationLink e afins que recebem uma ação/closure NUNCA podem ficar sem ela —
+      `Button("Título")` sozinho NÃO COMPILA, precisa de `action:` ou closure à direita.
+    - `.navigationDestination(for:)` espera um TIPO (ex.: `Int.self`), nunca um valor literal.
+    - Todo parâmetro de inicializador usado precisa existir de verdade no tipo (não invente).
+    - O walkthrough/explicação NUNCA pode descrever uma mudança que não está de fato no código final —
+      se a explicação diz que algo foi ajustado, o código tem que refletir exatamente isso.
+    """
 
     /// Limpa marcação de código/JSON que o MLX às vezes deixa no rascunho.
     private static func sanitizeDraft(_ draft: String) -> String {
@@ -567,6 +647,8 @@ final class StudyGenerator {
         Você recebe um rascunho de pergunta técnica de Swift, já com a resposta correta indicada.
         Sua tarefa é reformatar isso em uma pergunta de múltipla escolha com exatamente 4 alternativas plausíveis,
         sendo apenas uma correta — baseada fielmente no rascunho fornecido, sem inventar informação nova.
+        As alternativas NUNCA devem ter prefixo de letra ou número (nunca "A)", "B.", "1)" etc., mesmo que o
+        rascunho tenha algo parecido) — escreva só o texto puro de cada alternativa.
         Responda sempre em português.
         """
 
@@ -606,7 +688,8 @@ final class StudyGenerator {
         try await MLXService.shared.loadModel()
 
         // Plano V4 Fase 4: contexto via busca exata por tópico (nunca fuzzy).
-        let ragContext = await retrieveContext(for: topic, topK: 1)
+        // Plano V5: topK 3 — ver comentário equivalente em generateQuizBatch.
+        let ragContext = await retrieveContext(for: topic, topK: 3)
 
         let mlxPrompt = """
         Você é um especialista em Swift. Escreva \(count) trechos de código Swift limpos, de 6 a 10 linhas cada, sobre '\(topic)', e explique o comportamento de cada um. Os trechos devem ser distintos entre si.
@@ -632,7 +715,7 @@ final class StudyGenerator {
 
             var results: [CodeAnalysisQuestion] = []
             for draft in drafts.prefix(count) {
-                results.append(await formatCodeAnalysisQuestion(draft: draft, topic: topic, priority: priority))
+                results.append(await formatCodeAnalysisQuestion(draft: draft, topic: topic, context: ragContext, priority: priority))
             }
 
             while results.count < count {
@@ -642,7 +725,7 @@ final class StudyGenerator {
                         promptContext: mlxPrompt.replacingOccurrences(of: "Escreva \(count) trechos de código Swift limpos", with: "Escreva UM trecho de código Swift limpo")
                     )
                 }
-                results.append(await formatCodeAnalysisQuestion(draft: single, topic: topic, priority: priority))
+                results.append(await formatCodeAnalysisQuestion(draft: single, topic: topic, context: ragContext, priority: priority))
             }
             return results
         } catch {
@@ -652,7 +735,14 @@ final class StudyGenerator {
 
     /// Formata UM rascunho de análise de código do MLX via Foundation Models.
     /// Nunca lança: se a formatação falhar, devolve o fallback genérico.
-    private func formatCodeAnalysisQuestion(draft: String, topic: String, priority: GenerationOrchestrator.Priority) async -> CodeAnalysisQuestion {
+    ///
+    /// Hotfix pós-teste: usava a mesma instrução "preservar fielmente, sem
+    /// inventar informação nova" que causava alucinação sem correção no
+    /// exemplo de código (ver `formatCodeExample`) — mesmo bug, caminho
+    /// diferente, e evidenciado em teste real por uma sessão de análise de
+    /// código com 1/6 de acerto. Agora passa pela mesma crítica de 2
+    /// passadas (`critiqueCodeDraft`, reaproveitado) antes de formatar.
+    private func formatCodeAnalysisQuestion(draft: String, topic: String, context: String, priority: GenerationOrchestrator.Priority) async -> CodeAnalysisQuestion {
         let cleanDraft = Self.sanitizeDraft(draft)
 
         // Tenta isolar só o código pro snippet do fallback
@@ -697,17 +787,37 @@ final class StudyGenerator {
             return fallbackQuestion
         }
 
+        let critique = (try? await critiqueCodeDraft(draft: cleanDraft, topic: topic, context: context, priority: priority)) ?? "OK - sem erros"
+        print("🔵 [análise de código] crítica técnica: \(critique.prefix(200))\(critique.count > 200 ? "…" : "")")
+
         let formatterInstructions = """
-        Você recebe um rascunho com um trecho de código Swift e a explicação do comportamento esperado dele.
+        Você recebe um rascunho com um trecho de código Swift e a explicação do comportamento esperado dele,
+        além de uma REVISÃO TÉCNICA feita por um segundo revisor, apontando erros reais (ou dizendo que não há).
         Sua tarefa é reformatar isso em uma pergunta de análise de código com exatamente 5 alternativas plausíveis,
-        sendo apenas uma correta — baseada fielmente no rascunho fornecido, sem inventar informação nova.
-        Preserve o código do rascunho exatamente como está no campo codeSnippet, sem a marcação 'CODIGO:'.
+        sendo apenas uma correta.
+        Se a revisão técnica apontou um erro real no código (API que não existe, sintaxe inválida, algo que não
+        compila sem intenção pedagógica), CORRIJA o código no campo codeSnippet antes de formatar — não preserve
+        um erro real só por fidelidade ao rascunho. Se a revisão disse que não há erros, preserve o código como
+        está, sem a marcação 'CODIGO:'.
+        A alternativa correta e as explicações têm que corresponder exatamente ao comportamento real do código
+        já corrigido, não ao rascunho original.
+        As alternativas NUNCA devem ter prefixo de letra ou número (nunca "A)", "B.", "1)" etc.) — escreva
+        só o texto puro de cada alternativa.
+
+        \(Self.commonCodeMistakesChecklist)
+
         Responda sempre em português.
         """
 
         let formatterPrompt = """
-        Rascunho gerado por outro modelo:
+        Contexto da documentação oficial:
+        \(context.isEmpty ? "Conhecimento geral de Swift, com cautela." : context)
+
+        Rascunho gerado por outro modelo sobre '\(topic)':
         \(cleanDraft)
+
+        Revisão técnica do rascunho acima (aplique as correções apontadas, se houver):
+        \(critique)
 
         Reformate esse rascunho em uma pergunta de análise de código sobre '\(topic)',
         com 5 alternativas plausíveis (não óbvias) e a alternativa correta identificada.

@@ -26,7 +26,10 @@ enum DatasetVersion {
     // v5 (Plano V4 Fase 3): chunks auditados contra a documentação oficial
     // (correções em Guard, Coleções, Property Observers, Protocolos e
     // Generics) — bump invalida tópicos gerados com o texto antigo.
-    static var current = "apple-docs-v5"
+    // v6 (Plano V5): dataset reduzido de 21 pra 3 tópicos (NavigationStack,
+    // Property Wrappers, async/await) — bump limpa qualquer tópico dos 18
+    // removidos que ainda esteja em cache.
+    static var current = "apple-docs-v6"
 }
 
 @Model

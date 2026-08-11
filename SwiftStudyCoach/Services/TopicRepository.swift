@@ -61,7 +61,7 @@ final class TopicRepository {
                 let quizTarget = targetEasy + targetMedium + targetHard
                 if existing.quizPool.count < quizTarget || existing.codeAnalysisPool.count < targetCodeAnalysis {
                     print("🟠 fetchOrCreate: pool incompleto (\(existing.quizPool.count)/\(quizTarget) quiz, \(existing.codeAnalysisPool.count)/\(targetCodeAnalysis) análise) — retomando crescimento em background.")
-                    let context = await generator.retrieveContext(for: topic, topK: 2)
+                    let context = await generator.retrieveContext(for: topic, topK: 3)
                     // Retomada de crescimento interrompido usa o ALVO CHEIO
                     // (não o "piso" da 1ª sessão) — isso é rede de segurança
                     // pra geração que ficou pela metade, não o fluxo normal
@@ -119,13 +119,14 @@ final class TopicRepository {
         await GenerationOrchestrator.shared.cancelPending(priority: .poolFill)
 
         // Contexto de documentação recuperado uma única vez e reaproveitado
-        // nas chamadas de geração abaixo. topK menor que antes (2 em vez de
-        // 3) reduz a pressão na janela de contexto do Foundation Models —
-        // causa mais provável do erro genérico que aparecia em tópicos com
-        // muitos chunks (ex: NavigationStack). O exemplo de código usa um
-        // contexto ainda menor (topK 1), já que tem chamada dedicada.
-        let context = await generator.retrieveContext(for: topic, topK: 2)
-        let codeContext = await generator.retrieveContext(for: topic, topK: 1)
+        // nas chamadas de geração abaixo. Plano V5: dataset caiu pra 3
+        // tópicos com no máximo 3 chunks cada — topK 3 pega o tópico
+        // INTEIRO sempre (sem cortar chunk fora, como acontecia com o
+        // topK 2 antigo — Property Wrappers, por exemplo, perdia o chunk
+        // do @Observable, a abordagem moderna). Contexto do exemplo de
+        // código também subiu (1 → 2) pra reduzir alucinação.
+        let context = await generator.retrieveContext(for: topic, topK: 3)
+        let codeContext = await generator.retrieveContext(for: topic, topK: 2)
 
         // Plano V4 Fase 1 — fluxo 100% SÍNCRONO: gera TUDO em variáveis
         // locais, numa cadeia linear de awaits (sem Trilha A/Trilha B
@@ -159,8 +160,10 @@ final class TopicRepository {
 
         // Hotfix pós-teste: pedir o alvo inteiro (6) numa chamada só fazia o
         // StudyGenerator completar item a item, SEM limite, sempre que o MLX
-        // devolvia menos rascunhos que o pedido num lote (comum com o
-        // Qwen 3B em lotes grandes — o separador nem sempre é respeitado).
+        // devolvia menos rascunhos que o pedido num lote (visto com o Qwen
+        // 3B em lotes grandes — separador nem sempre respeitado; o 14B atual
+        // segue formato com bem mais consistência, mas o padrão de lotes
+        // pequenos + desistência é mantido como defesa, sem custo real).
         // generateQuizPool/generateCodeAnalysisPool reintroduzem o mesmo
         // padrão de resiliência que já existia em growDifficulty/
         // growCodeAnalysis (lotes pequenos + desistência após 3 lotes
@@ -208,7 +211,7 @@ final class TopicRepository {
         }
 
         print("🔵 replenishAfterSession: repondo pool de '\(topicName)' até o buffer cheio (\(topic.quizPool.count)/\(quizTarget) quiz, \(topic.codeAnalysisPool.count)/\(targetCodeAnalysis) análise).")
-        let context = await generator.retrieveContext(for: topicName, topK: 2)
+        let context = await generator.retrieveContext(for: topicName, topK: 3)
         // Prioridade .nextSession (Plano V3 4.2): mais urgente que um
         // enchimento de pool genérico, já que está preparando especificamente
         // a PRÓXIMA sessão do usuário nesse tópico — mas ainda atrás de

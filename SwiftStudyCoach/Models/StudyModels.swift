@@ -16,10 +16,10 @@ import FoundationModels
 
 @Generable
 struct TopicSummary {
-    @Guide(description: "Resumo do tópico de Swift em português, entre 100 e 150 palavras, para um dev iniciante/intermediário. Baseie-se apenas no contexto fornecido, nunca invente comportamento de API.")
+    @Guide(description: "Resumo do tópico de Swift em português, entre 180 e 280 palavras, para um dev iniciante/intermediário. Cubra TODOS os conceitos centrais distintos presentes no contexto — não escolha só um e ignore os outros. Se o contexto distinguir uma abordagem antiga de uma moderna/recomendada, explique as duas e deixe claro qual é a recomendada hoje. Baseie-se apenas no contexto fornecido, nunca invente comportamento de API.")
     var summary: String
 
-    @Guide(description: "De 2 a 3 pontos-chave do tópico, cada um em uma frase curta")
+    @Guide(description: "De 3 a 5 pontos-chave do tópico, cada um em uma frase curta, cobrindo conceitos DIFERENTES entre si (não repita a mesma ideia com outras palavras)")
     var keyPoints: [String]
 }
 
@@ -61,7 +61,7 @@ struct QuizQuestion {
     @Guide(description: "Pergunta de múltipla escolha em português sobre o tópico, no nível de dificuldade indicado. Dificuldade real deve vir do raciocínio exigido, não só do vocabulário usado.")
     var question: String
 
-    @Guide(description: "Exatamente 4 alternativas de resposta, plausíveis entre si, em português")
+    @Guide(description: "Exatamente 4 alternativas de resposta, plausíveis entre si, em português. SEM prefixo de letra ou número (nunca 'A)', 'B.', '1)' etc.) — só o texto puro da alternativa, a interface já numera sozinha.")
     var options: [String]
 
     @Guide(description: "Índice (0 a 3) da alternativa correta dentro de options")
@@ -84,7 +84,7 @@ struct CodeAnalysisQuestion {
     @Guide(description: "Pergunta sobre o comportamento, saída ou problema do trecho de código acima")
     var question: String
 
-    @Guide(description: "Exatamente 5 alternativas de resposta, plausíveis entre si, em português")
+    @Guide(description: "Exatamente 5 alternativas de resposta, plausíveis entre si, em português. SEM prefixo de letra ou número (nunca 'A)', 'B.', '1)' etc.) — só o texto puro da alternativa, a interface já numera sozinha.")
     var options: [String]
 
     @Guide(description: "Índice (0 a 4) da alternativa correta dentro de options")

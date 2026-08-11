@@ -19,7 +19,7 @@ struct ContentView: View {
     @State private var generator: StudyGenerator?
     @State private var repository: TopicRepository?
 
-    @State private var topic: String = "Optionals"
+    @State private var topic: String = "async/await"
     @State private var studyTopic: StudyTopic?
     @State private var sampledQuiz: [PersistedQuizQuestion] = []
 
@@ -41,7 +41,7 @@ struct ContentView: View {
                 }
 
                 Section("Tópico de Swift") {
-                    TextField("Ex: Optionals, async/await, Generics", text: $topic)
+                    TextField("Ex: NavigationStack, Property Wrappers, async/await", text: $topic)
 
                     Button {
                         Task { await loadTopic() }
