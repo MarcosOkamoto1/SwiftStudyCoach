@@ -123,7 +123,26 @@ final class DocumentIndex {
     }
 
     /// Busca híbrida com fusão de score:
-    ///   score = 0.6 * cosseno + 0.4 * overlap léxico + boost de tópico (0.25)
+    ///   score = 0.35 * cosseno + 0.5 * overlap léxico + boost de tópico
+    ///   (0.40 se o nome do tópico bater EXATO, 0.15 se bater parcial)
+    ///
+    /// Pesos ajustados (Plano V5) depois de medir no RAGTestView que o
+    /// cosseno do NLContextualEmbedding (usado pelo pacote
+    /// NaturalLanguageEmbeddings) tem baseline alto pra QUALQUER par de
+    /// textos curtos no mesmo domínio — o próprio README do pacote recomenda
+    /// minimumSimilarity 0.85 pra busca semântica pura, porque termos
+    /// não-relacionados já ficam na faixa 0.60-0.89. Com cosseno pesando 0.6
+    /// no fusion score antigo, esse "ruído" alto dominava a nota mesmo
+    /// quando overlap léxico e boost de tópico apontavam claramente pro
+    /// chunk certo (ex.: "Property Wrappers" como query batendo quase
+    /// empatado com o chunk de async/await). Agora o cosseno pesa menos
+    /// (sinal mais fraco pra esse domínio) e o overlap léxico — mais
+    /// confiável aqui, já que termos técnicos como "@State"/"TaskGroup" são
+    /// literais e específicos de cada tópico — pesa mais. O boost de tópico
+    /// também virou dois níveis: um match EXATO do nome do tópico (o cenário
+    /// mais comum no RAGTestView) agora domina o ranking de forma bem mais
+    /// confiável do que o boost único de 0.25 anterior.
+    ///
     /// O match direto de tópico (ex: usuário digitou "Optionals" e existe um
     /// chunk topic == "Optionals") vira um BOOST em vez de curto-circuito —
     /// assim um chunk de outro tópico muito relevante ainda pode competir, e
@@ -149,12 +168,12 @@ final class DocumentIndex {
             let lexical = Self.lexicalOverlap(queryTokens: queryTokens, text: chunk.text)
 
             let normalizedTopic = normalize(chunk.topic)
-            let topicMatches = normalizedTopic == normalizedQuery
-                || normalizedTopic.contains(normalizedQuery)
-                || normalizedQuery.contains(normalizedTopic)
-            let topicBoost: Double = topicMatches ? 0.25 : 0
+            let isExactTopicMatch = normalizedTopic == normalizedQuery
+            let isPartialTopicMatch = !isExactTopicMatch
+                && (normalizedTopic.contains(normalizedQuery) || normalizedQuery.contains(normalizedTopic))
+            let topicBoost: Double = isExactTopicMatch ? 0.40 : (isPartialTopicMatch ? 0.15 : 0)
 
-            scored.append((chunk, 0.6 * cosine + 0.4 * lexical + topicBoost, lexical, topicBoost))
+            scored.append((chunk, 0.35 * cosine + 0.5 * lexical + topicBoost, lexical, topicBoost))
         }
         scored.sort { $0.score > $1.score }
 
