@@ -2,8 +2,14 @@
 //  StudyHomeView.swift
 //  SwiftStudyCoach
 //
-//  Parte 7 — ponto de entrada pras telas visuais reais: digitar/escolher
-//  um tópico e abrir o TopicStudyView (artigo + flashcards/quiz/análise).
+//  Parte 7 — ponto de entrada pras telas visuais reais: escolher um tópico
+//  curado e abrir o TopicStudyView (artigo + quiz/análise).
+//
+//  Plano V3 2.1/2.2: a busca livre (TextField) saiu — todo caminho passa
+//  pela lista curada, derivada do dataset (PlaceholderDocs.topicsByBlock()),
+//  garantindo que o RAG sempre tenha grounding real pro tópico escolhido.
+//  Nada aqui é hardcoded: adicionar um chunk novo ao dataset é suficiente
+//  pro tópico aparecer sozinho, no bloco certo.
 //
 
 import SwiftUI
@@ -12,10 +18,9 @@ import SwiftData
 struct StudyHomeView: View {
     @Query(sort: \StudyTopic.createdAt, order: .reverse) private var topics: [StudyTopic]
 
-    @State private var topicName: String = ""
     @State private var navigateTo: String?
 
-    private let suggestions = ["NavigationStack", "Property Wrappers", "Guard"]
+    private let track: [TrackSection] = PlaceholderDocs.topicsByBlock()
 
     var body: some View {
         NavigationStack {
@@ -33,23 +38,6 @@ struct StudyHomeView: View {
                         }
                         .padding(.top, 20)
 
-                        HStack {
-                            TextField("", text: $topicName, prompt: Text("Ex: Guard, Optionals, Actors").foregroundColor(DS.Colors.mistDim))
-                                .font(DS.Fonts.body(16))
-                                .foregroundStyle(DS.Colors.foam)
-                                .padding(14)
-                                .background(RoundedRectangle(cornerRadius: 12).fill(DS.Colors.slate))
-                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.Colors.hairline, lineWidth: 1))
-                        }
-
-                        Button("Estudar") {
-                            let trimmed = topicName.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !trimmed.isEmpty else { return }
-                            navigateTo = trimmed
-                        }
-                        .buttonStyle(DSButtonStyle(accent: DS.Colors.violet, filled: true))
-                        .disabled(topicName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
                         if !topics.isEmpty {
                             sectionLabel("JÁ ESTUDADOS")
                             VStack(spacing: 8) {
@@ -60,11 +48,13 @@ struct StudyHomeView: View {
                             }
                         }
 
-                        sectionLabel("SUGESTÕES")
-                        VStack(spacing: 8) {
-                            ForEach(suggestions, id: \.self) { suggestion in
-                                topicRow(suggestion, meta: nil)
-                                    .onTapGesture { navigateTo = suggestion }
+                        ForEach(track) { entry in
+                            sectionLabel("BLOCO \(entry.block.rawValue) — \(entry.block.title.uppercased())")
+                            VStack(spacing: 8) {
+                                ForEach(entry.topics, id: \.self) { topicName in
+                                    topicRow(topicName, meta: nil)
+                                        .onTapGesture { navigateTo = topicName }
+                                }
                             }
                         }
                     }
@@ -111,7 +101,6 @@ struct StudyHomeView: View {
     StudyHomeView()
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ])

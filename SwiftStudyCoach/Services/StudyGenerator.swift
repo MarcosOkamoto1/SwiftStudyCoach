@@ -5,13 +5,64 @@
 //  Encapsula a comunicação com o Foundation Models framework, com
 //  grounding via RAG (DocumentIndex).
 //
+//  Melhorias desta versão:
+//  - StudyGeneratorError agora é LocalizedError e carrega a ETAPA que
+//    falhou + o erro real do Foundation Models (antes a UI só mostrava
+//    "error 1" genérico, impossível de diagnosticar).
+//  - Retry com degradação: contexto excedeu a janela → refaz com contexto
+//    reduzido; decodingFailure → 1 retry; rateLimited → espera 2s e refaz.
+//  - O exemplo de código saiu do TopicSummary e virou uma chamada
+//    DEDICADA (generateCodeExample), com orçamento de tokens próprio —
+//    era o último campo do schema e o primeiro a ser truncado.
+//  - Perguntas difíceis (MLX) agora são geradas em LOTE: um único prefill
+//    do prompt para N rascunhos, em vez de um prefill por pergunta.
+//
 
 import Foundation
 import FoundationModels
 
-enum StudyGeneratorError: Error {
+enum StudyGeneratorError: LocalizedError {
     case modelUnavailable(String)
-    case generationFailed(Error)
+    case generationFailed(step: String, underlying: Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .modelUnavailable(let reason):
+            return reason
+        case .generationFailed(let step, let underlying):
+            return "Falha ao gerar \(step): \(Self.describe(underlying))"
+        }
+    }
+
+    /// Traduz o erro real do Foundation Models numa mensagem diagnosticável
+    /// em português — é isso que aparece na UI e nos logs.
+    static func describe(_ error: Error) -> String {
+        if let genError = error as? LanguageModelSession.GenerationError {
+            switch genError {
+            case .exceededContextWindowSize:
+                return "o contexto enviado excedeu a janela do modelo (tente novamente — o app reduz o contexto automaticamente)."
+            case .guardrailViolation:
+                return "o pedido foi bloqueado pelos filtros de segurança do sistema."
+            case .decodingFailure:
+                return "a resposta não pôde ser decodificada no formato esperado (possível truncamento)."
+            case .rateLimited:
+                return "limite de requisições do sistema atingido — aguarde alguns segundos."
+            case .assetsUnavailable:
+                return "os recursos do modelo não estão disponíveis (Apple Intelligence ainda baixando ou desativado em Ajustes)."
+            case .concurrentRequests:
+                return "requisições simultâneas na mesma sessão do modelo."
+            case .refusal:
+                return "o modelo recusou o pedido."
+            case .unsupportedLanguageOrLocale:
+                return "idioma/região não suportado pelo modelo."
+            case .unsupportedGuide:
+                return "o schema de geração pedido não é suportado."
+            default:
+                return String(describing: genError)
+            }
+        }
+        return error.localizedDescription
+    }
 }
 
 @Observable
@@ -27,9 +78,21 @@ final class StudyGenerator {
 
     /// Recupera o contexto de documentação para um tópico uma única vez,
     /// para ser reutilizado em múltiplas chamadas de geração (resumo,
-    /// flashcards, lotes de quiz, análise de código) sem repetir a busca RAG.
+    /// lotes de quiz, análise de código) sem repetir a busca RAG.
+    ///
+    /// Plano V4 Fase 4: todo caminho de geração interno já sabe o NOME
+    /// EXATO do tópico, então usa primeiro a busca determinística por
+    /// igualdade de `chunk.topic` — zero chance de contaminação
+    /// cross-topic. Só cai no hybridSearch (fuzzy) se o tópico não
+    /// existir literalmente no dataset (defesa; não deveria acontecer,
+    /// já que a home deriva os tópicos do próprio dataset).
     func retrieveContext(for topic: String, topK: Int = 3) async -> String {
-        (try? await documentIndex.retrieveContext(for: topic, topK: topK)) ?? ""
+        let exact = documentIndex.chunks(forExactTopic: topic)
+        if !exact.isEmpty {
+            return exact.prefix(topK).map(\.text).joined(separator: "\n\n")
+        }
+        print("⚠️ retrieveContext: nenhum chunk com topic exatamente '\(topic)' — caindo no hybridSearch (fuzzy).")
+        return (try? await documentIndex.retrieveContext(for: topic, topK: topK)) ?? ""
     }
 
     /// Verifica se o modelo de sistema está disponível neste device.
@@ -45,13 +108,81 @@ final class StudyGenerator {
         }
     }
 
-    /// Gera um resumo estruturado para um tópico de Swift, com grounding via RAG.
-    func generateSummary(topic: String, context: String) async throws -> TopicSummary {
+    private func requireModel() throws -> SystemLanguageModel {
         let model = SystemLanguageModel.default
-
         guard case .available = model.availability else {
             throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
         }
+        return model
+    }
+
+    // MARK: - Retry com degradação de contexto
+
+    /// Reduz o contexto RAG pro primeiro chunk apenas (os chunks são
+    /// separados por linha em branco em retrieveContext).
+    private static func reduceContext(_ context: String) -> String {
+        context.components(separatedBy: "\n\n").first ?? ""
+    }
+
+    /// Executa `attempt` e, se falhar com um erro conhecido do Foundation
+    /// Models, aplica UMA estratégia de recuperação antes de desistir:
+    /// - exceededContextWindowSize → refaz com contexto reduzido (e depois vazio)
+    /// - decodingFailure → 1 retry simples (sessão nova, resultado não-determinístico)
+    /// - rateLimited / concurrentRequests → espera 2s e refaz
+    /// Qualquer falha final é embrulhada com a etapa + causa real.
+    private func withDiagnostics<T>(
+        step: String,
+        context: String,
+        attempt: (String) async throws -> T
+    ) async throws -> T {
+        do {
+            return try await attempt(context)
+        } catch {
+            var lastError = error
+
+            if let genError = error as? LanguageModelSession.GenerationError {
+                switch genError {
+                case .exceededContextWindowSize:
+                    let reduced = Self.reduceContext(context)
+                    print("⚠️ [\(step)] contexto excedeu a janela — retry com contexto reduzido (\(reduced.count)/\(context.count) chars).")
+                    do {
+                        return try await attempt(reduced)
+                    } catch {
+                        lastError = error
+                        if !reduced.isEmpty, let recovered = try? await attempt("") {
+                            print("⚠️ [\(step)] recuperado com contexto vazio.")
+                            return recovered
+                        }
+                    }
+
+                case .decodingFailure:
+                    print("⚠️ [\(step)] decodingFailure — 1 retry.")
+                    do { return try await attempt(context) } catch { lastError = error }
+
+                case .rateLimited, .concurrentRequests:
+                    print("⚠️ [\(step)] rate limited — aguardando 2s antes do retry.")
+                    try? await Task.sleep(for: .seconds(2))
+                    do { return try await attempt(context) } catch { lastError = error }
+
+                default:
+                    break
+                }
+            }
+
+            print("❌ [\(step)] falhou: \(StudyGeneratorError.describe(lastError))")
+            throw StudyGeneratorError.generationFailed(step: step, underlying: lastError)
+        }
+    }
+
+    // MARK: - Resumo (sem código — ver generateCodeExample)
+
+    /// Gera um resumo estruturado (resumo + pontos-chave) para um tópico de
+    /// Swift, com grounding via RAG. O exemplo de código NÃO faz mais parte
+    /// desta chamada — tem chamada e orçamento próprios em
+    /// generateCodeExample, pra nunca mais ser truncado por competir com o
+    /// resto do schema.
+    func generateSummary(topic: String, context: String, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> TopicSummary {
+        let model = try requireModel()
 
         let instructions = """
         Você é um assistente educacional especializado em Swift e nos frameworks da Apple.
@@ -59,115 +190,304 @@ final class StudyGenerator {
         Baseie-se PRINCIPALMENTE no contexto de documentação fornecido abaixo.
         Se o contexto não cobrir algum detalhe, seja conservador e não invente
         nomes de métodos, parâmetros ou comportamentos que não estão no contexto.
-        Ao gerar exemplos de código, sempre inclua comentários em português explicando
-        CADA linha ou bloco relevante, como se estivesse ensinando alguém que está
-        vendo aquilo pela primeira vez. Use nomes de variáveis e funções descritivos.
         """
 
-        let session = LanguageModelSession(model: model, instructions: instructions)
+        // Plano V3 4.2: toda a operação (incluindo os retries internos de
+        // withDiagnostics) roda como UM job serializado na fila do FM —
+        // nenhuma outra chamada ao Foundation Models entra no meio.
+        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+            try await self.withDiagnostics(step: "resumo do tópico", context: context) { ctx in
+                let session = LanguageModelSession(model: model, instructions: instructions)
 
-        let prompt: String
-        if context.isEmpty {
-            prompt = """
-            Tópico: \(topic)
+                let prompt: String
+                if ctx.isEmpty {
+                    prompt = """
+                    Tópico: \(topic)
 
-            Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
-            iniciante/intermediário, incluindo pontos-chave e um exemplo de código.
-            """
-        } else {
-            prompt = """
-            Tópico: \(topic)
+                    Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
+                    iniciante/intermediário, incluindo pontos-chave.
+                    """
+                } else {
+                    prompt = """
+                    Tópico: \(topic)
 
-            Contexto da documentação oficial (use isso como base principal):
-            \(context)
+                    Contexto da documentação oficial (use isso como base principal):
+                    \(ctx)
 
-            Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
-            iniciante/intermediário, incluindo pontos-chave e um exemplo de código.
-            """
-        }
+                    Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
+                    iniciante/intermediário, incluindo pontos-chave.
+                    """
+                }
 
-        // Orçamento generoso de tokens: resumo (~100-150 palavras) + 2-3
-        // pontos-chave + exemplo de código (5-15 linhas comentado) cabem
-        // folgados aqui. Como codeExample é o último campo gerado, é o mais
-        // afetado quando o orçamento padrão do framework não é suficiente.
-        let options = GenerationOptions(maximumResponseTokens: 900)
-
-        do {
-            let response = try await session.respond(
-                to: prompt,
-                generating: TopicSummary.self,
-                options: options
-            )
-
-            return response.content
-        } catch {
-            throw StudyGeneratorError.generationFailed(error)
+                // Sem o codeExample no schema, 500 tokens são folgados para
+                // resumo (~100-150 palavras) + 2-3 pontos-chave.
+                let options = GenerationOptions(maximumResponseTokens: 500)
+                let response = try await session.respond(to: prompt, generating: TopicSummary.self, options: options)
+                return response.content
+            }
         }
     }
 
-    /// Gera flashcards para um tópico.
-    func generateFlashcards(topic: String, context: String, count: Int = 8) async throws -> [Flashcard] {
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else {
-            throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
+    // MARK: - Exemplo de código explicado (chamada dedicada)
+
+    /// Plano V4 Fase 2 — passo a passo no mesmo padrão MLX→FM que já
+    /// existe pra quiz difícil e análise de código: o MLX rascunha código +
+    /// explicação em texto puro, e o Foundation Models só REFORMATA esse
+    /// rascunho no schema ExplainedCodeExample. Se o MLX estiver
+    /// indisponível ou qualquer etapa falhar, cai pro fluxo antigo (FM
+    /// gerando do zero) — a criação do tópico nunca trava por causa disso.
+    func generateCodeExample(topic: String, context: String, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> ExplainedCodeExample {
+        do {
+            try await MLXService.shared.loadModel()
+
+            let mlxPrompt = """
+            Você é um especialista em Swift. Escreva UM código Swift de 5-15 linhas, limpo e completo, que ilustre o conceito principal de '\(topic)', e explique-o passo a passo em texto puro.
+
+            [Contexto oficial]:
+            \(context.isEmpty ? "Conhecimento geral sobre Swift e Apple Frameworks." : context)
+
+            IMPORTANTE: use SOMENTE APIs, tipos e modificadores que aparecem no contexto oficial acima \
+            ou que você tem certeza absoluta que existem na versão atual de Swift/SwiftUI. NÃO invente \
+            nomes de métodos, classes, structs ou modificadores. Se não tiver certeza de que algo existe, \
+            prefira uma abordagem mais simples e genérica em vez de arriscar um nome inventado.
+
+            Formato exato da resposta (texto puro, sem markdown, sem JSON):
+            CODIGO:
+            <código>
+            PASSO A PASSO:
+            1. <trecho> — <explicação>
+            2. <trecho> — <explicação>
+            """
+
+            let draft = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
+                try await MLXService.shared.generateQuestionDraft(
+                    systemPrompt: "Você é um especialista em Swift. Gere um código de exemplo curto e uma explicação passo a passo, em texto puro, usando apenas APIs reais.",
+                    promptContext: mlxPrompt
+                )
+            }
+            print("🔵 [exemplo de código] rascunho MLX recebido (\(draft.count) chars) — formatando via Foundation Models.")
+            return try await formatCodeExample(draft: draft, topic: topic, context: context, priority: priority)
+        } catch {
+            print("⚠️ [exemplo de código] fluxo MLX→FM falhou (\(StudyGeneratorError.describe(error))) — fallback: Foundation Models gerando do zero.")
+            return try await generateCodeExampleFromScratch(topic: topic, context: context, priority: priority)
         }
+    }
+
+    /// Reformata o rascunho do MLX (código + passo a passo em texto puro)
+    /// no schema ExplainedCodeExample via Foundation Models, reaproveitando
+    /// o `looksTruncated` + retry curto que já existia pro exemplo de código.
+    ///
+    /// Hotfix pós-teste: a instrução anterior pedia pra FM preservar o
+    /// rascunho "fielmente, sem inventar informação nova" — isso fazia a
+    /// formatação simplesmente HERDAR qualquer alucinação do MLX (ex.:
+    /// `Navigation.push(...)`, que não existe, ou `.navigationBarTitle`,
+    /// deprecado desde o NavigationStack) sem chance de correção, porque
+    /// nem o contexto RAG chegava até aqui. Agora `formatCodeExample`
+    /// recebe o `context` (mesmo grounding usado pra gerar o rascunho) e a
+    /// instrução vira CORRETIVA: o contexto documentado é a fonte de
+    /// verdade, e qualquer API do rascunho que não exista ou contradiga o
+    /// contexto deve ser substituída pela forma real/atual.
+    private func formatCodeExample(draft: String, topic: String, context: String, priority: GenerationOrchestrator.Priority) async throws -> ExplainedCodeExample {
+        let cleanDraft = Self.sanitizeDraft(draft)
+        guard !cleanDraft.isEmpty else {
+            throw StudyGeneratorError.generationFailed(
+                step: "formatação do exemplo de código",
+                underlying: NSError(domain: "StudyGenerator", code: 1, userInfo: [NSLocalizedDescriptionKey: "rascunho MLX vazio"])
+            )
+        }
+        let model = try requireModel()
+
+        let instructions = """
+        Você recebe um rascunho com um código Swift e sua explicação passo a passo, gerado por outro modelo —
+        esse rascunho PODE conter erros técnicos: APIs que não existem, métodos/modificadores deprecados,
+        ou padrões de outras linguagens/frameworks confundidos com Swift.
+        Sua tarefa é reformatar isso num exemplo de código explicado, usando o contexto de documentação oficial
+        fornecido como FONTE DE VERDADE: se o rascunho usar uma API que não existe, que diverge do contexto,
+        ou que está deprecada em favor de outra mostrada no contexto, CORRIJA para a forma real e atual —
+        não preserve um erro técnico só por fidelidade ao rascunho.
+        Nunca invente um nome de método, tipo ou modificador que você não tem certeza que existe.
+        Preserve a intenção didática do rascunho (o conceito que ele tenta ilustrar) e, quando o código
+        já estiver correto, o código em si — mas o resultado final precisa ser Swift real e compilável.
+        Responda sempre em português.
+        """
+
+        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+            try await self.withDiagnostics(step: "formatação do exemplo de código", context: context) { ctx in
+                let session = LanguageModelSession(model: model, instructions: instructions)
+
+                let prompt = """
+                Contexto da documentação oficial (fonte de verdade — corrija o rascunho por isso):
+                \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
+
+                Rascunho gerado por outro modelo sobre '\(topic)':
+                \(cleanDraft)
+
+                Reformate esse rascunho no exemplo de código explicado, com o walkthrough passo a passo.
+                Se o rascunho contradisser o contexto acima, o contexto vence.
+                """
+
+                let options = GenerationOptions(maximumResponseTokens: 1100)
+                let response = try await session.respond(to: prompt, generating: ExplainedCodeExample.self, options: options)
+                let example = response.content
+
+                if Self.looksTruncated(example.code) {
+                    print("⚠️ [formatação do exemplo de código] código parece truncado — retry pedindo versão mais curta.")
+                    let retrySession = LanguageModelSession(model: model, instructions: instructions)
+                    let retryPrompt = prompt + "\n\nIMPORTANTE: mantenha NO MÁXIMO 8 linhas de código."
+                    let retry = try await retrySession.respond(to: retryPrompt, generating: ExplainedCodeExample.self, options: options)
+                    if !Self.looksTruncated(retry.content.code) {
+                        return retry.content
+                    }
+                }
+                return example
+            }
+        }
+    }
+
+    /// Fluxo antigo (pré-V4): Foundation Models gera código + walkthrough do
+    /// zero, numa chamada dedicada. Mantido como FALLBACK do caminho MLX→FM.
+    private func generateCodeExampleFromScratch(topic: String, context: String, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> ExplainedCodeExample {
+        let model = try requireModel()
 
         let instructions = """
         Você é um assistente educacional especializado em Swift e nos frameworks da Apple.
         Responda sempre em português.
-        Baseie-se PRINCIPALMENTE no contexto de documentação fornecido abaixo.
-        Gere flashcards com pergunta curta de um lado e resposta objetiva do outro.
+        Baseie-se PRINCIPALMENTE no contexto de documentação fornecido.
+        Gere um exemplo de código Swift completo e compilável, e explique-o passo a passo,
+        como se estivesse ensinando alguém que vê aquilo pela primeira vez.
+        Use nomes de variáveis e funções descritivos.
         """
 
-        let session = LanguageModelSession(model: model, instructions: instructions)
+        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+            try await self.withDiagnostics(step: "exemplo de código", context: context) { ctx in
+                let session = LanguageModelSession(model: model, instructions: instructions)
 
-        let prompt = """
-        Tópico: \(topic)
+                let prompt = """
+                Tópico: \(topic)
 
-        Contexto da documentação (use como base principal):
-        \(context.isEmpty ? "Nenhum contexto adicional disponível — use conhecimento geral de Swift, com cautela." : context)
+                Contexto da documentação oficial:
+                \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
 
-        Gere exatamente \(count) flashcards distintos sobre o tópico acima.
-        """
+                Gere UM exemplo de código Swift (5-15 linhas, completo, sem cortes) que
+                ilustre o conceito principal do tópico, com a explicação passo a passo.
+                """
 
-        // Defensivo: mesmo teto generoso do resumo, para evitar truncamento
-        // quando `count` for alto e a resposta ficar longa.
-        let options = GenerationOptions(maximumResponseTokens: 600)
+                // Orçamento dedicado só pro exemplo — nada compete com ele.
+                // Precisa ser generoso: o walkthrough REPETE os trechos do código
+                // (snippet + explicação por passo), então a resposta é ~2x o
+                // tamanho do código em si.
+                let options = GenerationOptions(maximumResponseTokens: 1100)
+                let response = try await session.respond(to: prompt, generating: ExplainedCodeExample.self, options: options)
+                let example = response.content
 
-        do {
-            let response = try await session.respond(to: prompt, generating: FlashcardBatch.self, options: options)
-            return response.content.flashcards
-        } catch {
-            throw StudyGeneratorError.generationFailed(error)
+                // Detecção de truncamento: se o código parece incompleto
+                // (delimitadores desbalanceados / termina "no meio"), tenta UMA
+                // vez com um exemplo mais curto antes de aceitar.
+                if Self.looksTruncated(example.code) {
+                    print("⚠️ [exemplo de código] código parece truncado — retry pedindo exemplo mais curto.")
+                    let retrySession = LanguageModelSession(model: model, instructions: instructions)
+                    let retryPrompt = prompt + "\n\nIMPORTANTE: o exemplo deve ter NO MÁXIMO 8 linhas de código."
+                    let retry = try await retrySession.respond(to: retryPrompt, generating: ExplainedCodeExample.self, options: options)
+                    if !Self.looksTruncated(retry.content.code) {
+                        return retry.content
+                    }
+                }
+                return example
+            }
         }
     }
 
+    /// Heurística barata de truncamento: chaves/parênteses desbalanceados
+    /// ou última linha terminando em token que nunca fecha um programa Swift.
+    static func looksTruncated(_ code: String) -> Bool {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+
+        var braces = 0, parens = 0, brackets = 0
+        var inString = false
+        var previous: Character = " "
+        for char in trimmed {
+            if char == "\"" && previous != "\\" { inString.toggle() }
+            if !inString {
+                switch char {
+                case "{": braces += 1
+                case "}": braces -= 1
+                case "(": parens += 1
+                case ")": parens -= 1
+                case "[": brackets += 1
+                case "]": brackets -= 1
+                default: break
+                }
+            }
+            previous = char
+        }
+        if braces != 0 || parens != 0 || brackets != 0 { return true }
+
+        let badEndings = [",", "{", "(", "[", "=", "+", "-", "*", "/", ":", "&&", "||", "->", "."]
+        if let lastLine = trimmed.components(separatedBy: .newlines).last?.trimmingCharacters(in: .whitespaces),
+           badEndings.contains(where: { lastLine.hasSuffix($0) }) {
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Quiz
+
     /// Gera perguntas de quiz. Se for Fácil/Média usa Foundation Model; se for Difícil puxa o MLX!
-    func generateQuizBatch(topic: String, context: String, difficulty: Difficulty, count: Int) async throws -> [QuizQuestion] {
-        
-        // 🔀 SE FOR DIFÍCIL: MLX gera o rascunho (texto livre), Foundation Models
-        // formata no schema QuizQuestion com alternativas reais baseadas no rascunho.
+    func generateQuizBatch(topic: String, context: String, difficulty: Difficulty, count: Int, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> [QuizQuestion] {
+
+        // 🔀 SE FOR DIFÍCIL: MLX gera os rascunhos EM LOTE (um único prefill
+        // pra N perguntas), e o Foundation Models formata cada rascunho no
+        // schema QuizQuestion com alternativas reais.
         if difficulty == .hard {
             try await MLXService.shared.loadModel()
 
-            let ragContext = (try? await documentIndex.retrieveContext(for: topic, topK: 1)) ?? ""
+            // Plano V4 Fase 4: contexto via busca exata por tópico (nunca fuzzy).
+            let ragContext = await retrieveContext(for: topic, topK: 1)
 
-            // Respeita `count`: gera UM item por vez (rascunho MLX + formatação
-            // Foundation Models) em loop sequencial, em vez de sempre devolver
-            // uma única pergunta. Ver generateSingleHardQuestion abaixo.
+            let mlxPrompt = """
+            Você é um especialista em Swift. Crie \(count) perguntas técnicas de nível avançado sobre '\(topic)', distintas entre si.
+            Contexto oficial: \(ragContext)
+
+            Formato de CADA pergunta (texto puro, sem markdown), separadas pela linha \(MLXService.itemSeparator):
+            PERGUNTA: <a pergunta>
+            RESPOSTA CORRETA: <explicação do comportamento/resposta certa, 1-2 frases>
+            POR QUE OUTRAS RESPOSTAS PARECEM CERTAS MAS NÃO SÃO: <1-2 frases de erros comuns/conceitos que confundem>
+            """
+
+            // Plano V3 4.2: chamadas de geração no MLX passam pela fila
+            // própria do motor MLX (paralela à do FM, nunca a mesma fila).
+            let drafts = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
+                try await MLXService.shared.generateQuestionDrafts(
+                    systemPrompt: "Você é um especialista em Swift. Gere perguntas técnicas difíceis sobre conceitos da linguagem, em texto puro.",
+                    promptContext: mlxPrompt,
+                    count: count
+                )
+            }
+
             var results: [QuizQuestion] = []
-            for _ in 0..<count {
-                let question = try await generateSingleHardQuestion(topic: topic, ragContext: ragContext, difficulty: difficulty)
+            for draft in drafts.prefix(count) {
+                let question = await formatHardQuestion(draft: draft, topic: topic, difficulty: difficulty, priority: priority)
+                results.append(question)
+            }
+
+            // Se o lote veio com menos itens que o pedido (split falhou ou o
+            // modelo gerou menos), completa um a um — nunca devolve menos.
+            while results.count < count {
+                let single = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
+                    try await MLXService.shared.generateQuestionDraft(
+                        systemPrompt: "Você é um especialista em Swift. Gere uma pergunta técnica difícil sobre um conceito da linguagem, em texto puro.",
+                        promptContext: mlxPrompt.replacingOccurrences(of: "Crie \(count) perguntas técnicas", with: "Crie UMA pergunta técnica")
+                    )
+                }
+                let question = await formatHardQuestion(draft: single, topic: topic, difficulty: difficulty, priority: priority)
                 results.append(question)
             }
             return results
         }
-        
+
         // 🍏 Usar o Foundation Model para Fácil e Média
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else {
-            throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
-        }
+        let model = try requireModel()
 
         let instructions = """
         Você é um assistente educacional especializado em Swift e nos frameworks da Apple.
@@ -175,8 +495,6 @@ final class StudyGenerator {
         Baseie-se PRINCIPALMENTE no contexto de documentação fornecido.
         Gere perguntas de múltipla escolha com exatamente 4 alternativas, sendo apenas uma correta.
         """
-
-        let session = LanguageModelSession(model: model, instructions: instructions)
 
         let fewShot = """
         Exemplo de pergunta FÁCIL:
@@ -187,50 +505,42 @@ final class StudyGenerator {
 
         let difficultyLabel = (difficulty == .easy) ? "FÁCIL" : "MÉDIA"
 
-        let prompt = """
-        Tópico: \(topic)
-        Contexto da documentação: \(context.isEmpty ? "Conhecimento geral sobre Swift." : context)
-        \(fewShot)
+        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+            try await self.withDiagnostics(step: "quiz \(difficultyLabel.lowercased())", context: context) { ctx in
+                let session = LanguageModelSession(model: model, instructions: instructions)
 
-        Gere exatamente \(count) perguntas de quiz NOVAS de dificuldade \(difficultyLabel).
-        """
+                let prompt = """
+                Tópico: \(topic)
+                Contexto da documentação: \(ctx.isEmpty ? "Conhecimento geral sobre Swift." : ctx)
+                \(fewShot)
 
-        // Defensivo: mesmo teto generoso do resumo, para evitar truncamento
-        // quando `count` for alto e a resposta ficar longa.
-        let options = GenerationOptions(maximumResponseTokens: 600)
+                Gere exatamente \(count) perguntas de quiz NOVAS de dificuldade \(difficultyLabel).
+                """
 
-        do {
-            let response = try await session.respond(to: prompt, generating: QuizQuestionBatch.self, options: options)
-            return response.content.questions
-        } catch {
-            throw StudyGeneratorError.generationFailed(error)
+                // ~220 tokens por pergunta (enunciado + 4 alternativas +
+                // explicação, em português). O teto fixo de 600 era a causa dos
+                // decodingFailure: 5-6 perguntas não cabiam e a resposta chegava
+                // truncada, quebrando a decodificação do schema.
+                let options = GenerationOptions(maximumResponseTokens: 220 * count + 150)
+                let response = try await session.respond(to: prompt, generating: QuizQuestionBatch.self, options: options)
+                return response.content.questions
+            }
         }
     }
 
-    /// Extrai a lógica de UMA pergunta difícil (rascunho MLX + formatação FM)
-    /// pra uma função separada, chamada em loop por generateQuizBatch — assim
-    /// o parâmetro `count` é respeitado em vez de sempre gerar 1 item.
-    private func generateSingleHardQuestion(topic: String, ragContext: String, difficulty: Difficulty) async throws -> QuizQuestion {
-        let mlxPrompt = """
-        Você é um especialista em Swift. Crie UMA pergunta técnica de nível avançado sobre '\(topic)'.
-        Contexto oficial: \(ragContext)
-
-        Formato da resposta (texto puro, sem markdown):
-        PERGUNTA: <a pergunta>
-        RESPOSTA CORRETA: <explicação do comportamento/resposta certa, 1-2 frases>
-        POR QUE OUTRAS RESPOSTAS PARECEM CERTAS MAS NÃO SÃO: <1-2 frases de erros comuns/conceitos que confundem>
-        """
-
-        let draft = try await MLXService.shared.generateQuestionDraft(
-            systemPrompt: "Você é um especialista em Swift. Gere uma pergunta técnica difícil sobre um conceito da linguagem, em texto puro.",
-            promptContext: mlxPrompt
-        )
-
-        let cleanDraft = draft
+    /// Limpa marcação de código/JSON que o MLX às vezes deixa no rascunho.
+    private static func sanitizeDraft(_ draft: String) -> String {
+        draft
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```swift", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Formata UM rascunho do MLX numa QuizQuestion via Foundation Models.
+    /// Nunca lança: se a formatação falhar, devolve o fallback genérico.
+    private func formatHardQuestion(draft: String, topic: String, difficulty: Difficulty, priority: GenerationOrchestrator.Priority) async -> QuizQuestion {
+        let cleanDraft = Self.sanitizeDraft(draft)
 
         // ⚠️ Fallback genérico — usado APENAS como último recurso, se o
         // Foundation Models estiver indisponível ou falhar ao formatar.
@@ -260,8 +570,6 @@ final class StudyGenerator {
         Responda sempre em português.
         """
 
-        let formatterSession = LanguageModelSession(model: model, instructions: formatterInstructions)
-
         let formatterPrompt = """
         Rascunho gerado por outro modelo:
         \(cleanDraft)
@@ -270,43 +578,43 @@ final class StudyGenerator {
         com 4 alternativas plausíveis (não óbvias) e a alternativa correta identificada.
         """
 
-        do {
-            let formatted = try await formatterSession.respond(to: formatterPrompt, generating: QuizQuestion.self)
-            return formatted.content
-        } catch {
-            print("⚠️ Foundation Models falhou ao formatar rascunho do MLX: \(error)")
-            return fallbackQuestion
+        // Até 3 tentativas com pausa: mantido como rede de segurança pra
+        // falhas reais do modelo (guardrail, decoding), não mais pra
+        // contenção entre FM/MLX — isso agora é responsabilidade da fila
+        // serial do GenerationOrchestrator (Plano V3 4.2), que garante uma
+        // única chamada FM em voo por vez.
+        for attempt in 1...3 {
+            do {
+                let formatted = try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                    let session = LanguageModelSession(model: model, instructions: formatterInstructions)
+                    return try await session.respond(to: formatterPrompt, generating: QuizQuestion.self)
+                }
+                return formatted.content
+            } catch {
+                print("⚠️ Formatação do rascunho MLX falhou (tentativa \(attempt)/3): \(StudyGeneratorError.describe(error))")
+                if attempt < 3 { try? await Task.sleep(for: .seconds(2)) }
+            }
         }
+        return fallbackQuestion
     }
 
-    /// Gera um lote de perguntas de análise de código (100% gerenciado pelo MLX de forma estruturada)
-    func generateCodeAnalysisBatch(topic: String, context: String, count: Int) async throws -> [CodeAnalysisQuestion] {
+    // MARK: - Análise de código
+
+    /// Gera um lote de perguntas de análise de código (rascunhos MLX em lote
+    /// + formatação estruturada via Foundation Models).
+    func generateCodeAnalysisBatch(topic: String, context: String, count: Int, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> [CodeAnalysisQuestion] {
         try await MLXService.shared.loadModel()
 
-        let ragContext = (try? await documentIndex.retrieveContext(for: topic, topK: 1)) ?? ""
+        // Plano V4 Fase 4: contexto via busca exata por tópico (nunca fuzzy).
+        let ragContext = await retrieveContext(for: topic, topK: 1)
 
-        // Respeita `count`: gera UM item por vez (rascunho MLX + formatação
-        // Foundation Models) em loop sequencial, em vez de sempre devolver
-        // uma única pergunta. Ver generateSingleCodeAnalysisQuestion abaixo.
-        var results: [CodeAnalysisQuestion] = []
-        for _ in 0..<count {
-            let question = try await generateSingleCodeAnalysisQuestion(topic: topic, ragContext: ragContext)
-            results.append(question)
-        }
-        return results
-    }
-
-    /// Extrai a lógica de UMA análise de código (rascunho MLX + formatação FM)
-    /// pra uma função separada, chamada em loop por generateCodeAnalysisBatch —
-    /// assim o parâmetro `count` é respeitado em vez de sempre gerar 1 item.
-    private func generateSingleCodeAnalysisQuestion(topic: String, ragContext: String) async throws -> CodeAnalysisQuestion {
-        let prompt = """
-        Você é um especialista em Swift. Escreva um trecho de código Swift limpo de 6 a 10 linhas sobre '\(topic)' e explique seu comportamento.
+        let mlxPrompt = """
+        Você é um especialista em Swift. Escreva \(count) trechos de código Swift limpos, de 6 a 10 linhas cada, sobre '\(topic)', e explique o comportamento de cada um. Os trechos devem ser distintos entre si.
 
         [Contexto RAG]:
         \(ragContext.isEmpty ? "Conhecimento geral sobre Swift e Apple Frameworks." : ragContext)
 
-        Formato da resposta (texto puro, sem markdown, sem JSON):
+        Formato de CADA item (texto puro, sem markdown, sem JSON), separados pela linha \(MLXService.itemSeparator):
         CODIGO:
         <o trecho de código Swift>
         COMPORTAMENTO ESPERADO: <o que o código faz / resultado ao executar, 1-2 frases>
@@ -314,118 +622,145 @@ final class StudyGenerator {
         """
 
         do {
-            let rawDraft = try await MLXService.shared.generateQuestionDraft(
-                systemPrompt: "Você é um especialista em Swift. Gere um trecho de código e uma pergunta de análise sobre seu comportamento, em texto puro.",
-                promptContext: prompt
-            )
+            let drafts = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
+                try await MLXService.shared.generateQuestionDrafts(
+                    systemPrompt: "Você é um especialista em Swift. Gere trechos de código e perguntas de análise sobre seus comportamentos, em texto puro.",
+                    promptContext: mlxPrompt,
+                    count: count
+                )
+            }
 
-            // Higienização do rascunho (código + explicação do comportamento)
-            let cleanDraft = rawDraft
-                .replacingOccurrences(of: "```swift", with: "")
-                .replacingOccurrences(of: "```json", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            var results: [CodeAnalysisQuestion] = []
+            for draft in drafts.prefix(count) {
+                results.append(await formatCodeAnalysisQuestion(draft: draft, topic: topic, priority: priority))
+            }
 
-            // Tenta isolar só o código pro snippet do fallback
-            var fallbackSnippet = cleanDraft
-                .components(separatedBy: "COMPORTAMENTO ESPERADO:").first?
-                .replacingOccurrences(of: "CODIGO:", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-            if fallbackSnippet.isEmpty {
-                fallbackSnippet = """
-                import SwiftUI
-
-                struct \(topic.replacingOccurrences(of: " ", with: ""))DemoView: View {
-                    @State private var isActive: Bool = false
-
-                    var body: some View {
-                        Text("Demonstração de \(topic)")
-                    }
+            while results.count < count {
+                let single = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
+                    try await MLXService.shared.generateQuestionDraft(
+                        systemPrompt: "Você é um especialista em Swift. Gere um trecho de código e uma pergunta de análise sobre seu comportamento, em texto puro.",
+                        promptContext: mlxPrompt.replacingOccurrences(of: "Escreva \(count) trechos de código Swift limpos", with: "Escreva UM trecho de código Swift limpo")
+                    )
                 }
-                """
+                results.append(await formatCodeAnalysisQuestion(draft: single, topic: topic, priority: priority))
             }
-
-            // ⚠️ Fallback genérico — usado APENAS como último recurso, se o
-            // Foundation Models estiver indisponível ou falhar ao formatar.
-            let fallbackQuestion = CodeAnalysisQuestion(
-                codeSnippet: fallbackSnippet,
-                question: "Analisando o código Swift acima sobre '\(topic)', qual é o resultado ou comportamento esperado?",
-                options: [
-                    "Executa normalmente e produz o resultado esperado sem erros",
-                    "Ocorre um erro de compilação devido a incompatibilidade de tipos ou sintaxe",
-                    "Provoca um vazamento de memória (retain cycle) com closures ou instâncias",
-                    "Causa uma exceção / erro em tempo de execução (fatal error)",
-                    "O estado permanece inalterado por se tratar de um tipo de valor imutável"
-                ],
-                correctOptionIndex: 0,
-                explanation: "Análise de código gerada localmente pelo MLX com suporte RAG da documentação oficial de \(topic)."
-            )
-
-            let model = SystemLanguageModel.default
-            guard !cleanDraft.isEmpty, case .available = model.availability else {
-                print("⚠️ Rascunho vazio ou Foundation Models indisponível — usando fallback genérico")
-                return fallbackQuestion
-            }
-
-            let formatterInstructions = """
-            Você recebe um rascunho com um trecho de código Swift e a explicação do comportamento esperado dele.
-            Sua tarefa é reformatar isso em uma pergunta de análise de código com exatamente 5 alternativas plausíveis,
-            sendo apenas uma correta — baseada fielmente no rascunho fornecido, sem inventar informação nova.
-            Preserve o código do rascunho exatamente como está no campo codeSnippet, sem a marcação 'CODIGO:'.
-            Responda sempre em português.
-            """
-
-            let formatterSession = LanguageModelSession(model: model, instructions: formatterInstructions)
-
-            let formatterPrompt = """
-            Rascunho gerado por outro modelo:
-            \(cleanDraft)
-
-            Reformate esse rascunho em uma pergunta de análise de código sobre '\(topic)',
-            com 5 alternativas plausíveis (não óbvias) e a alternativa correta identificada.
-            """
-
-            do {
-                let formatted = try await formatterSession.respond(to: formatterPrompt, generating: CodeAnalysisQuestion.self)
-                return formatted.content
-            } catch {
-                print("⚠️ Foundation Models falhou ao formatar rascunho do MLX: \(error)")
-                return fallbackQuestion
-            }
+            return results
         } catch {
-            throw StudyGeneratorError.generationFailed(error)
+            throw StudyGeneratorError.generationFailed(step: "análise de código (MLX)", underlying: error)
         }
     }
 
-    /// Gera o feedback de fim de sessão.
-    func generateFeedback(topic: String, performanceSummary: String) async throws -> StudyFeedback {
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else {
-            throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
+    /// Formata UM rascunho de análise de código do MLX via Foundation Models.
+    /// Nunca lança: se a formatação falhar, devolve o fallback genérico.
+    private func formatCodeAnalysisQuestion(draft: String, topic: String, priority: GenerationOrchestrator.Priority) async -> CodeAnalysisQuestion {
+        let cleanDraft = Self.sanitizeDraft(draft)
+
+        // Tenta isolar só o código pro snippet do fallback
+        var fallbackSnippet = cleanDraft
+            .components(separatedBy: "COMPORTAMENTO ESPERADO:").first?
+            .replacingOccurrences(of: "CODIGO:", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if fallbackSnippet.isEmpty {
+            fallbackSnippet = """
+            import SwiftUI
+
+            struct \(topic.replacingOccurrences(of: " ", with: ""))DemoView: View {
+                @State private var isActive: Bool = false
+
+                var body: some View {
+                    Text("Demonstração de \(topic)")
+                }
+            }
+            """
         }
-        
+
+        // ⚠️ Fallback genérico — usado APENAS como último recurso, se o
+        // Foundation Models estiver indisponível ou falhar ao formatar.
+        let fallbackQuestion = CodeAnalysisQuestion(
+            codeSnippet: fallbackSnippet,
+            question: "Analisando o código Swift acima sobre '\(topic)', qual é o resultado ou comportamento esperado?",
+            options: [
+                "Executa normalmente e produz o resultado esperado sem erros",
+                "Ocorre um erro de compilação devido a incompatibilidade de tipos ou sintaxe",
+                "Provoca um vazamento de memória (retain cycle) com closures ou instâncias",
+                "Causa uma exceção / erro em tempo de execução (fatal error)",
+                "O estado permanece inalterado por se tratar de um tipo de valor imutável"
+            ],
+            correctOptionIndex: 0,
+            explanation: "Análise de código gerada localmente pelo MLX com suporte RAG da documentação oficial de \(topic)."
+        )
+
+        let model = SystemLanguageModel.default
+        guard !cleanDraft.isEmpty, case .available = model.availability else {
+            print("⚠️ Rascunho vazio ou Foundation Models indisponível — usando fallback genérico")
+            return fallbackQuestion
+        }
+
+        let formatterInstructions = """
+        Você recebe um rascunho com um trecho de código Swift e a explicação do comportamento esperado dele.
+        Sua tarefa é reformatar isso em uma pergunta de análise de código com exatamente 5 alternativas plausíveis,
+        sendo apenas uma correta — baseada fielmente no rascunho fornecido, sem inventar informação nova.
+        Preserve o código do rascunho exatamente como está no campo codeSnippet, sem a marcação 'CODIGO:'.
+        Responda sempre em português.
+        """
+
+        let formatterPrompt = """
+        Rascunho gerado por outro modelo:
+        \(cleanDraft)
+
+        Reformate esse rascunho em uma pergunta de análise de código sobre '\(topic)',
+        com 5 alternativas plausíveis (não óbvias) e a alternativa correta identificada.
+        """
+
+        // Mesmo esquema de retry do formatHardQuestion (ver comentário lá) —
+        // rede de segurança pra falhas reais do modelo, já não pra
+        // contenção FM/MLX, que a fila do GenerationOrchestrator elimina.
+        for attempt in 1...3 {
+            do {
+                let formatted = try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                    let session = LanguageModelSession(model: model, instructions: formatterInstructions)
+                    return try await session.respond(to: formatterPrompt, generating: CodeAnalysisQuestion.self)
+                }
+                return formatted.content
+            } catch {
+                print("⚠️ Formatação do rascunho MLX falhou (tentativa \(attempt)/3): \(StudyGeneratorError.describe(error))")
+                if attempt < 3 { try? await Task.sleep(for: .seconds(2)) }
+            }
+        }
+        return fallbackQuestion
+    }
+
+    // MARK: - Feedback
+
+    /// Gera o feedback de fim de sessão. `validTopics` (Plano V3 2.5) é a
+    /// lista de tópicos que realmente existem no dataset — sem ela, o
+    /// modelo às vezes recomenda um `recommendedNextTopic` que não existe
+    /// em lugar nenhum do app, um beco sem saída pro usuário.
+    func generateFeedback(topic: String, performanceSummary: String, validTopics: [String], priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> StudyFeedback {
+        let model = try requireModel()
+
         let instructions = """
         Você é um mentor educacional especializado em Swift e nos frameworks da Apple.
         Responda sempre em português.
         Dê um feedback específico e construtivo baseado apenas no desempenho relatado.
         """
-        
-        let session = LanguageModelSession(model: model, instructions: instructions)
-        
-        let prompt = """
-        Tópico estudado: \(topic)
-        Desempenho do usuário nesta sessão: \(performanceSummary)
-        """
-        
-        // Defensivo: mesmo teto generoso do resumo, para evitar truncamento.
-        let options = GenerationOptions(maximumResponseTokens: 600)
 
-        do {
-            let response = try await session.respond(to: prompt, generating: StudyFeedback.self, options: options)
-            return response.content
-        } catch {
-            throw StudyGeneratorError.generationFailed(error)
+        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+            try await self.withDiagnostics(step: "feedback da sessão", context: "") { _ in
+                let session = LanguageModelSession(model: model, instructions: instructions)
+
+                let topicsList = validTopics.isEmpty ? "" : validTopics.joined(separator: ", ")
+                let prompt = """
+                Tópico estudado: \(topic)
+                Desempenho do usuário nesta sessão: \(performanceSummary)
+                \(topicsList.isEmpty ? "" : "Para recommendedNextTopic, recomende OBRIGATORIAMENTE um destes tópicos (copie o nome exatamente como está aqui), o que fizer mais sentido dado os erros cometidos: \(topicsList)")
+                """
+
+                let options = GenerationOptions(maximumResponseTokens: 600)
+                let response = try await session.respond(to: prompt, generating: StudyFeedback.self, options: options)
+                return response.content
+            }
         }
     }
 }

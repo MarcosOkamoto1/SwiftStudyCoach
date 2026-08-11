@@ -26,6 +26,11 @@ struct RootTabView: View {
                 .tabItem { Label("RAG", systemImage: "magnifyingglass") }
         }
         .tint(DS.Colors.violet)
+        // Plano V3 4.3: no launch, se o modelo MLX já estiver em cache
+        // local (checagem só com FileManager, sem rede), carrega ele em
+        // background — assim a 1ª pergunta difícil não paga o custo de
+        // carga. Sem cache, não faz nada (sem download não-solicitado).
+        .task { MLXService.shared.prewarmIfCached() }
     }
 }
 
@@ -33,7 +38,6 @@ struct RootTabView: View {
     RootTabView()
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ])

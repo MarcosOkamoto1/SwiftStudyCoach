@@ -3,9 +3,9 @@
 //  SwiftStudyCoach
 //
 //  Entidades SwiftData persistidas. Os @Generable em StudyModels.swift
-//  (Flashcard, QuizQuestion, CodeAnalysisQuestion) são os DTOs de saída
-//  do Foundation Models — as classes @Model abaixo é que ficam salvas em
-//  disco, com um mapeamento simples campo a campo entre os dois.
+//  (QuizQuestion, CodeAnalysisQuestion) são os DTOs de saída do Foundation
+//  Models — as classes @Model abaixo é que ficam salvas em disco, com um
+//  mapeamento simples campo a campo entre os dois.
 //
 
 import Foundation
@@ -18,7 +18,15 @@ enum DatasetVersion {
     // `var` (não `let`) de propósito: permite trocar em runtime a partir da
     // tela de teste (TopicRepositoryTestView) para validar a invalidação de
     // cache sem precisar recompilar o app.
-    static var current = "apple-docs-v2"
+    // v3: exemplo de código agora vem com walkthrough estruturado (gerado em
+    // chamada dedicada) — bump invalida tópicos antigos sem walkthrough.
+    // v4 (Plano V3): flashcards saíram do schema persistido, e o dataset
+    // cresceu de 3 pra 21 tópicos com metadado de bloco — bump invalida os
+    // 3 tópicos antigos (gerados sem essas mudanças) de uma vez.
+    // v5 (Plano V4 Fase 3): chunks auditados contra a documentação oficial
+    // (correções em Guard, Coleções, Property Observers, Protocolos e
+    // Generics) — bump invalida tópicos gerados com o texto antigo.
+    static var current = "apple-docs-v5"
 }
 
 @Model
@@ -27,12 +35,16 @@ final class StudyTopic {
     var summary: String
     var keyPoints: [String]
     var codeExample: String
+
+    // Walkthrough do exemplo de código (arrays paralelos: snippet[i] é
+    // explicado por explanation[i]). Arrays de String com default = migração
+    // leve automática no SwiftData, sem precisar de entidade nova.
+    var walkthroughSnippets: [String] = []
+    var walkthroughExplanations: [String] = []
+
     var createdAt: Date
     var sourceDatasetVersion: String   // invalida cache antigo quando muda
     var isGeneratingPool: Bool = false // evita disparar geração em background em duplicidade
-
-    @Relationship(deleteRule: .cascade)
-    var flashcards: [PersistedFlashcard]
 
     @Relationship(deleteRule: .cascade)
     var quizPool: [PersistedQuizQuestion]
@@ -40,32 +52,25 @@ final class StudyTopic {
     @Relationship(deleteRule: .cascade)
     var codeAnalysisPool: [PersistedCodeAnalysisQuestion]
 
-    init(name: String, summary: String, keyPoints: [String], codeExample: String) {
+    init(
+        name: String,
+        summary: String,
+        keyPoints: [String],
+        codeExample: String,
+        walkthroughSnippets: [String] = [],
+        walkthroughExplanations: [String] = []
+    ) {
         self.name = name
         self.summary = summary
         self.keyPoints = keyPoints
         self.codeExample = codeExample
+        self.walkthroughSnippets = walkthroughSnippets
+        self.walkthroughExplanations = walkthroughExplanations
         self.createdAt = .now
         self.sourceDatasetVersion = DatasetVersion.current
         self.isGeneratingPool = false
-        self.flashcards = []
         self.quizPool = []
         self.codeAnalysisPool = []
-    }
-}
-
-@Model
-final class PersistedFlashcard {
-    var question: String
-    var answer: String
-
-    init(question: String, answer: String) {
-        self.question = question
-        self.answer = answer
-    }
-
-    convenience init(from dto: Flashcard) {
-        self.init(question: dto.question, answer: dto.answer)
     }
 }
 

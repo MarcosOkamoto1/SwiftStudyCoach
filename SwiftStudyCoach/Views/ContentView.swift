@@ -15,7 +15,7 @@ import SwiftData
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
 
-    @State private var documentIndex = DocumentIndex()
+    private let documentIndex = DocumentIndex.shared
     @State private var generator: StudyGenerator?
     @State private var repository: TopicRepository?
 
@@ -82,17 +82,8 @@ struct ContentView: View {
                             .textSelection(.enabled)
                     }
 
-                    Section("Flashcards (\(studyTopic.flashcards.count))") {
-                        ForEach(studyTopic.flashcards) { card in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(card.question).bold()
-                                Text(card.answer).font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-
                     Section("Pool de quiz") {
-                        Text("Total no pool: \(studyTopic.quizPool.count) / 40")
+                        Text("Total no pool: \(studyTopic.quizPool.count) / 24")
                         Text("Gerando em background: \(studyTopic.isGeneratingPool ? "sim" : "não")")
                             .foregroundStyle(.secondary)
 
@@ -132,7 +123,7 @@ struct ContentView: View {
         guard generator == nil else { return }
         isIndexing = true
         do {
-            try await documentIndex.buildIndex()
+            try await documentIndex.ensureReady()
             let generator = StudyGenerator(documentIndex: documentIndex)
             self.generator = generator
             self.repository = TopicRepository(modelContext: modelContext, generator: generator)
@@ -166,7 +157,6 @@ struct ContentView: View {
     ContentView()
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ], inMemory: true)

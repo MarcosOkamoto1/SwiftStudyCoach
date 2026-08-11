@@ -3,20 +3,19 @@
 //  SwiftStudyCoach
 //
 //  Parte 7 — tela "artigo" de leitura do tópico (inspirada no protótipo
-//  reading-interface.html) que orquestra as 3 telas de estudo (Flashcards,
-//  Quiz, Análise de Código) + resultado final, usando o TopicRepository
-//  (Parte 4/5) pra cache/persistência e o StudyGenerator (Parte 6) pro
-//  feedback final.
+//  reading-interface.html) que orquestra as telas de estudo (Quiz, Análise
+//  de Código) + resultado final, usando o TopicRepository (Parte 4/5) pra
+//  cache/persistência e o StudyGenerator (Parte 6) pro feedback final.
+//  Plano V3 1.3: flashcards saíram — redundantes com o quiz.
 //
 
 import SwiftUI
 import SwiftData
 
 private enum ActiveSheet: Identifiable {
-    case flashcards, quiz, codeAnalysis, result
+    case quiz, codeAnalysis, result
     var id: Int {
         switch self {
-        case .flashcards: return 0
         case .quiz: return 1
         case .codeAnalysis: return 2
         case .result: return 3
@@ -28,7 +27,9 @@ struct TopicStudyView: View {
     let topicName: String
 
     @Environment(\.modelContext) private var modelContext
-    @State private var documentIndex = DocumentIndex()
+    // Índice RAG único do app (embeddings cacheados em disco) — antes cada
+    // visita a esta tela criava um índice novo e re-embedava tudo.
+    private let documentIndex = DocumentIndex.shared
     @State private var generator: StudyGenerator?
     @State private var repository: TopicRepository?
 
@@ -40,6 +41,10 @@ struct TopicStudyView: View {
     @State private var quizAnswers: [AnsweredQuestion] = []
     @State private var codeAnswers: [AnsweredQuestion] = []
     @State private var activeSheet: ActiveSheet?
+    // Plano V3 2.5: destino de navegação quando o usuário toca no tópico
+    // recomendado na tela de resultado — empilha um novo TopicStudyView na
+    // MESMA NavigationStack (a que já existe lá na StudyHomeView).
+    @State private var recommendedTopicToOpen: String?
 
     var body: some View {
         DSScreen {
@@ -62,6 +67,9 @@ struct TopicStudyView: View {
                 .frame(minWidth: 560, minHeight: 640)
                 #endif
         }
+        .navigationDestination(item: $recommendedTopicToOpen) { name in
+            TopicStudyView(topicName: name)
+        }
     }
 
     // MARK: - Carregamento
@@ -69,30 +77,15 @@ struct TopicStudyView: View {
     private var loadingState: some View {
         Group {
             // MLXService é @Observable — só referenciar `loadState` aqui já
-            // faz essa View reagir automaticamente às mudanças, sem @State
-            // extra. Isso cobre o caso de primeira execução, quando o
-            // download do modelo (alguns GB) pode levar bastante tempo e,
-            // sem esse indicador específico, a tela pareceria travada.
-            if MLXService.shared.loadState == .downloading {
-                VStack(spacing: 12) {
-                    ProgressView().tint(DS.Colors.violet)
-                    Text("Baixando modelo MLX (só na primeira vez — alguns minutos)")
-                        .font(DS.Fonts.body(13))
-                        .foregroundStyle(DS.Colors.mistDim)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
+            // faz essa View reagir automaticamente às mudanças. Na primeira
+            // execução (download de ~1,7 GB), a ModelDownloadView mostra
+            // progresso real, velocidade e tempo restante estimado.
+            switch MLXService.shared.loadState {
+            case .downloading, .loadingIntoMemory, .failed:
+                ModelDownloadView {
+                    Task { await load() }
                 }
-            } else if case .failed(let reason) = MLXService.shared.loadState {
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(DS.Colors.orchid)
-                    Text("Falha ao baixar o modelo MLX: \(reason)")
-                        .font(DS.Fonts.body(13))
-                        .foregroundStyle(DS.Colors.mistDim)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                }
-            } else {
+            case .idle, .ready:
                 VStack(spacing: 14) {
                     ProgressView().tint(DS.Colors.violet)
                     Text("Gerando conteúdo de \"\(topicName)\"...")
@@ -127,7 +120,7 @@ struct TopicStudyView: View {
 
         do {
             if repository == nil {
-                try await documentIndex.buildIndex()
+                try await documentIndex.ensureReady()
                 let gen = StudyGenerator(documentIndex: documentIndex)
                 generator = gen
                 repository = TopicRepository(modelContext: modelContext, generator: gen)
@@ -159,8 +152,8 @@ struct TopicStudyView: View {
                     .padding(.bottom, 20)
 
                 HStack(spacing: 12) {
-                    PillView(text: "\(topic.flashcards.count) flashcards", borderColor: DS.Colors.hairline)
                     PillView(text: "\(topic.quizPool.count) no pool de quiz", borderColor: DS.Colors.hairline)
+                    PillView(text: "\(topic.codeAnalysisPool.count) análise de código", borderColor: DS.Colors.hairline)
                     if topic.isGeneratingPool {
                         HStack(spacing: 5) {
                             ProgressView().scaleEffect(0.6).tint(DS.Colors.violet)
@@ -178,6 +171,16 @@ struct TopicStudyView: View {
                     )
                     .frame(height: 1)
                     .padding(.bottom, 32)
+
+                // Plano V4 Fase 1: na criação inicial o download do MLX
+                // acontece DURANTE a tela de loading (fluxo síncrono) — este
+                // banner compacto fica só como defesa pra casos raros de
+                // download disparado com o artigo visível (retomada de pool
+                // incompleto). Some sozinho quando o estado vira .ready.
+                ModelDownloadView(compact: true) {
+                    Task { await load() }
+                }
+                .padding(.bottom, 24)
 
                 Text(topic.summary)
                     .font(DS.Fonts.body(18))
@@ -203,6 +206,11 @@ struct TopicStudyView: View {
 
                 if !topic.codeExample.isEmpty {
                     CodeBlockView(label: "exemplo", code: topic.codeExample)
+                        .padding(.bottom, topic.walkthroughSnippets.isEmpty ? 32 : 18)
+                }
+
+                if !topic.walkthroughSnippets.isEmpty {
+                    walkthroughSection(topic)
                         .padding(.bottom, 32)
                 }
 
@@ -214,6 +222,57 @@ struct TopicStudyView: View {
         }
     }
 
+    /// "Code walkthrough": explicação passo a passo do exemplo, gerada de
+    /// forma estruturada pelo Foundation Models (snippet[i] ↔ explicação[i]).
+    private func walkthroughSection(_ topic: StudyTopic) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Circle().fill(DS.Colors.sage).frame(width: 5, height: 5)
+                Text("PASSO A PASSO")
+                    .font(DS.Fonts.mono(10.5))
+                    .tracking(1.2)
+                    .foregroundStyle(DS.Colors.sage)
+            }
+
+            ForEach(Array(zip(topic.walkthroughSnippets, topic.walkthroughExplanations).enumerated()), id: \.offset) { index, step in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Text("\(index + 1)")
+                            .font(DS.Fonts.mono(11))
+                            .foregroundStyle(DS.Colors.sage)
+                            .frame(width: 20, height: 20)
+                            .background(Circle().fill(DS.Colors.sage.opacity(0.14)))
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(SyntaxHighlighter.highlight(step.0))
+                                .font(DS.Fonts.mono(12.5))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(DS.Colors.panel)
+                                )
+
+                            Text(step.1)
+                                .font(DS.Fonts.body(14))
+                                .foregroundStyle(DS.Colors.mist)
+                                .lineSpacing(5)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(DS.Colors.slate)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(DS.Colors.hairline, lineWidth: 1)
+        )
+    }
+
     private func actionGrid(_ topic: StudyTopic) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("PRATICAR")
@@ -222,13 +281,6 @@ struct TopicStudyView: View {
                 .foregroundStyle(DS.Colors.mistDim)
 
             VStack(spacing: 10) {
-                actionRow(
-                    title: "Flashcards",
-                    subtitle: "\(topic.flashcards.count) cards",
-                    icon: "rectangle.on.rectangle",
-                    color: DS.Colors.violet
-                ) { activeSheet = .flashcards }
-
                 actionRow(
                     title: "Quiz",
                     subtitle: "3 fácil + 4 média + 3 difícil, sorteadas do pool",
@@ -296,18 +348,16 @@ struct TopicStudyView: View {
     @ViewBuilder
     private func sheetContent(_ sheet: ActiveSheet) -> some View {
         switch sheet {
-        case .flashcards:
-            if let topic {
-                FlashcardsView(topicName: topic.name, flashcards: topic.flashcards)
-            }
         case .quiz:
             QuizView(topicName: topicName, questions: quizBatch) { answers in
                 quizAnswers = answers
+                replenishAfterSession()
             }
         case .codeAnalysis:
             if let topic {
                 CodeAnalysisView(topicName: topicName, questions: topic.codeAnalysisPool) { answers in
                     codeAnswers = answers
+                    replenishAfterSession()
                 }
             }
         case .result:
@@ -316,10 +366,20 @@ struct TopicStudyView: View {
                     topicName: topicName,
                     quizAnswers: quizAnswers,
                     codeAnswers: codeAnswers,
-                    generator: generator
+                    generator: generator,
+                    onSelectTopic: { name in recommendedTopicToOpen = name }
                 )
             }
         }
+    }
+
+    /// Plano V3 4.1 — dispara o top-up do pool quando uma sessão de quiz ou
+    /// de análise de código termina (o sheet fecha com respostas). Roda em
+    /// background (Task solta, sem bloquear a UI); o TopicRepository já se
+    /// protege contra disparo duplicado via `isGeneratingPool`.
+    private func replenishAfterSession() {
+        guard let repository else { return }
+        Task { await repository.replenishAfterSession(topicName: topicName) }
     }
 }
 
@@ -327,7 +387,6 @@ struct TopicStudyView: View {
     TopicStudyView(topicName: "Actors")
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ])

@@ -60,18 +60,26 @@ enum DS {
     }
 
     enum Fonts {
+        // Nota: .weight() em fonte custom sem eixo variável de peso não tem
+        // efeito e gera o warning "Unable to update Font Descriptor's weight"
+        // no console a cada render. Por isso só aplicamos .weight quando um
+        // peso não-padrão for pedido explicitamente (casos raros) — o padrão
+        // usa a face como ela é, sem warning.
+
         /// Títulos — Fraunces no protótipo.
         static func display(_ size: CGFloat, weight: Font.Weight = .medium) -> Font {
-            .custom("Fraunces", size: size, relativeTo: .title).weight(weight)
+            let base = Font.custom("Fraunces", size: size, relativeTo: .title)
+            return weight == .medium ? base : base.weight(weight)
         }
         /// Corpo de texto — Source Serif 4 no protótipo.
         static func body(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-            .custom("Source Serif 4", size: size, relativeTo: .body).weight(weight)
+            let base = Font.custom("Source Serif 4", size: size, relativeTo: .body)
+            return weight == .regular ? base : base.weight(weight)
         }
         /// Metadados/código — JetBrains Mono no protótipo.
         static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-            .custom("JetBrainsMono-Regular", size: size)
-                .weight(weight)
+            let base = Font.custom("JetBrainsMono-Regular", size: size)
+            return weight == .regular ? base : base.weight(weight)
         }
     }
 }
@@ -121,6 +129,33 @@ struct DSButtonStyle: ButtonStyle {
             .opacity(configuration.isPressed ? 0.75 : 1)
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Barra de progresso
+
+/// Barra de progresso fina, no estilo `.progress-track` / `.progress-fill`
+/// do protótipo HTML — reaproveitada nas telas de Quiz e Análise de Código.
+struct ProgressBar: View {
+    let progress: Double // 0...1
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Rectangle().fill(DS.Colors.hairlineSoft)
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [DS.Colors.violetDim, DS.Colors.violet],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(4, proxy.size.width * min(1, max(0, progress))))
+                    .animation(.easeOut(duration: 0.2), value: progress)
+            }
+        }
+        .frame(height: 2)
     }
 }
 

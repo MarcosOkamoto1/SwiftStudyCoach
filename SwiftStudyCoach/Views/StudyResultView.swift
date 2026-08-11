@@ -14,11 +14,19 @@ struct StudyResultView: View {
     let quizAnswers: [AnsweredQuestion]
     let codeAnswers: [AnsweredQuestion]
     let generator: StudyGenerator
+    /// Chamado quando o usuário toca no tópico recomendado — só existe
+    /// (vira um link) quando esse tópico foi resolvido pra um dos tópicos
+    /// reais do dataset (Plano V3 2.5). `nil` por padrão pras Previews.
+    var onSelectTopic: ((String) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var feedback: StudyFeedback?
     @State private var isGeneratingFeedback = false
     @State private var feedbackError: String?
+    /// Nome do tópico recomendado já resolvido contra o dataset (match
+    /// normalizado ou, na falta dele, o resultado do hybridSearch) — nil
+    /// se não foi possível resolver pra nenhum tópico real.
+    @State private var resolvedNextTopic: String?
 
     private var allAnswers: [AnsweredQuestion] { quizAnswers + codeAnswers }
     private var totalCorrect: Int { allAnswers.filter(\.isCorrect).count }
@@ -175,9 +183,31 @@ struct StudyResultView: View {
                     .font(DS.Fonts.mono(10))
                     .tracking(1.1)
                     .foregroundStyle(DS.Colors.mistDim)
-                Text(feedback.recommendedNextTopic)
-                    .font(DS.Fonts.body(15.5))
-                    .foregroundStyle(DS.Colors.violet)
+
+                if let resolvedNextTopic {
+                    // Só vira link clicável quando o tópico existe de
+                    // verdade no dataset (Plano V3 2.5) — nunca manda o
+                    // usuário pra um tópico que não gera nada.
+                    Button {
+                        let topicToOpen = resolvedNextTopic
+                        dismiss()
+                        onSelectTopic?(topicToOpen)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(resolvedNextTopic)
+                                .font(DS.Fonts.body(15.5))
+                                .foregroundStyle(DS.Colors.violet)
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 12))
+                                .foregroundStyle(DS.Colors.violet)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text(feedback.recommendedNextTopic)
+                        .font(DS.Fonts.body(15.5))
+                        .foregroundStyle(DS.Colors.mist)
+                }
             }
         }
         .padding(22)
@@ -215,16 +245,52 @@ struct StudyResultView: View {
 
         isGeneratingFeedback = true
         feedbackError = nil
+        resolvedNextTopic = nil
         defer { isGeneratingFeedback = false }
 
         var summary = ""
         if !quizAnswers.isEmpty { summary += quizAnswers.performanceSummary(sectionLabel: "Quiz") + "\n\n" }
         if !codeAnswers.isEmpty { summary += codeAnswers.performanceSummary(sectionLabel: "Análise de código") }
 
+        let validTopics = PlaceholderDocs.allTopics()
+
         do {
-            feedback = try await generator.generateFeedback(topic: topicName, performanceSummary: summary)
+            let result = try await generator.generateFeedback(topic: topicName, performanceSummary: summary, validTopics: validTopics)
+            feedback = result
+            await resolveRecommendedTopic(result.recommendedNextTopic, validTopics: validTopics)
         } catch {
             feedbackError = "Não foi possível gerar o feedback: \(error.localizedDescription)"
+        }
+    }
+
+    /// Resolve o texto livre de `recommendedNextTopic` pra um tópico real
+    /// do dataset (Plano V3 2.5): primeiro tenta um match normalizado
+    /// direto (o prompt já pede pro modelo copiar o nome exato, mas nem
+    /// sempre ele obedece); se não bater em nada, tenta o tópico mais
+    /// próximo via hybridSearch antes de desistir e mostrar sem link.
+    private func resolveRecommendedTopic(_ raw: String, validTopics: [String]) async {
+        if let exact = Self.normalizedMatch(raw, in: validTopics) {
+            resolvedNextTopic = exact
+            return
+        }
+        if let ranked = try? await DocumentIndex.shared.hybridSearch(query: raw, topK: 1),
+           let best = ranked.first, best.score >= 0.45 {
+            resolvedNextTopic = best.chunk.topic
+        } else {
+            resolvedNextTopic = nil
+        }
+    }
+
+    private static func normalizedMatch(_ raw: String, in topics: [String]) -> String? {
+        func normalize(_ s: String) -> String {
+            s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let target = normalize(raw)
+        guard !target.isEmpty else { return nil }
+        return topics.first {
+            let candidate = normalize($0)
+            return candidate == target || candidate.contains(target) || target.contains(candidate)
         }
     }
 }
@@ -234,6 +300,6 @@ struct StudyResultView: View {
         topicName: "Actors",
         quizAnswers: [],
         codeAnswers: [],
-        generator: StudyGenerator(documentIndex: DocumentIndex())
+        generator: StudyGenerator(documentIndex: DocumentIndex.shared)
     )
 }

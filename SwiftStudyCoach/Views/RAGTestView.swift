@@ -13,7 +13,7 @@
 import SwiftUI
 
 struct RAGTestView: View {
-    @State private var index = DocumentIndex()
+    private let index = DocumentIndex.shared
     @State private var query: String = "o que é optional binding"
     @State private var results: [(chunk: DocChunk, similarity: Double)] = []
     @State private var errorMessage: String?
@@ -77,7 +77,7 @@ struct RAGTestView: View {
     private func buildIndex() async {
         errorMessage = nil
         do {
-            try await index.buildIndex()
+            try await index.ensureReady()
         } catch {
             errorMessage = "Erro ao indexar: \(error.localizedDescription)"
         }

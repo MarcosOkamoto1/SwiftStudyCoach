@@ -23,7 +23,7 @@ struct TopicRepositoryTestView: View {
     // ver o pool crescer na tela.
     @Query(sort: \StudyTopic.createdAt, order: .reverse) private var allTopics: [StudyTopic]
 
-    @State private var documentIndex = DocumentIndex()
+    private let documentIndex = DocumentIndex.shared
     @State private var generator: StudyGenerator?
     @State private var repository: TopicRepository?
     @State private var isSettingUp = false
@@ -89,7 +89,7 @@ struct TopicRepositoryTestView: View {
         isSettingUp = true
         defer { isSettingUp = false }
         do {
-            try await documentIndex.buildIndex()
+            try await documentIndex.ensureReady()
             let gen = StudyGenerator(documentIndex: documentIndex)
             generator = gen
             repository = TopicRepository(modelContext: modelContext, generator: gen)
@@ -142,7 +142,7 @@ struct TopicRepositoryTestView: View {
             let topic = try await repository.fetchOrCreate(topic: topicName)
             lastLoadDuration = Date().timeIntervalSince(start)
             loadedTopicID = topic.persistentModelID
-            appendLog("Carregado '\(topic.name)' em \(String(format: "%.2f", lastLoadDuration ?? 0))s — resumo \(topic.summary.isEmpty ? "VAZIO ⚠️" : "OK (\(topic.summary.count) chars)"), \(topic.flashcards.count) flashcards, \(topic.quizPool.count) quiz, \(topic.codeAnalysisPool.count) análise de código.")
+            appendLog("Carregado '\(topic.name)' em \(String(format: "%.2f", lastLoadDuration ?? 0))s — resumo \(topic.summary.isEmpty ? "VAZIO ⚠️" : "OK (\(topic.summary.count) chars)"), \(topic.quizPool.count) quiz, \(topic.codeAnalysisPool.count) análise de código.")
         } catch {
             loadErrorMessage = "Erro: \(error.localizedDescription)"
             appendLog("❌ Erro ao carregar '\(topicName)': \(error.localizedDescription)")
@@ -158,11 +158,11 @@ struct TopicRepositoryTestView: View {
         let total = topic.quizPool.count
 
         return Section("2) Pool de quiz em background (checklist item 2)") {
-            LabeledContent("Fácil", value: "\(easy) / 14")
-            LabeledContent("Média", value: "\(medium) / 13")
-            LabeledContent("Difícil", value: "\(hard) / 13")
-            LabeledContent("Total", value: "\(total) / 40")
-            LabeledContent("Análise de código", value: "\(topic.codeAnalysisPool.count)")
+            LabeledContent("Fácil", value: "\(easy) / 6")
+            LabeledContent("Média", value: "\(medium) / 6")
+            LabeledContent("Difícil", value: "\(hard) / 6")
+            LabeledContent("Total", value: "\(total) / 24")
+            LabeledContent("Análise de código", value: "\(topic.codeAnalysisPool.count) / 6")
 
             HStack {
                 Circle()
@@ -344,7 +344,6 @@ struct TopicRepositoryTestView: View {
     TopicRepositoryTestView()
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ])

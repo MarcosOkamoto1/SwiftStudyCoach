@@ -21,23 +21,30 @@ struct TopicSummary {
 
     @Guide(description: "De 2 a 3 pontos-chave do tópico, cada um em uma frase curta")
     var keyPoints: [String]
+}
 
-    @Guide(description: "Um exemplo de código curto (5-15 linhas), comentado, que ilustra o conceito principal")
-    var codeExample: String
+/// Exemplo de código "explicado" — gerado numa chamada DEDICADA (ver
+/// StudyGenerator.generateCodeExample), separada do resumo. Dois motivos:
+/// 1. Quando codeExample era o último campo do TopicSummary, era o primeiro
+///    a ser truncado quando o orçamento de tokens acabava.
+/// 2. O schema FORÇA a explicação passo a passo (walkthrough) — instrução de
+///    prompt pedindo "comente o código" era frequentemente ignorada.
+@Generable
+struct ExplainedCodeExample {
+    @Guide(description: "Código Swift completo e compilável do exemplo, 5-15 linhas, SEM comentários (a explicação vai no walkthrough)")
+    var code: String
+
+    @Guide(description: "Explicação passo a passo do código acima: entre 3 e 5 passos, um por bloco relevante, na ordem em que aparecem, em português, como se ensinasse alguém vendo aquilo pela primeira vez")
+    var walkthrough: [CodeStep]
 }
 
 @Generable
-struct Flashcard {
-    @Guide(description: "Pergunta curta e objetiva sobre um conceito do tópico")
-    var question: String
+struct CodeStep {
+    @Guide(description: "O trecho exato do código sendo explicado (1-3 linhas, copiado literalmente do campo code)")
+    var snippet: String
 
-    @Guide(description: "Resposta objetiva e direta à pergunta, 1-2 frases")
-    var answer: String
-}
-
-@Generable
-struct FlashcardBatch {
-    var flashcards: [Flashcard]
+    @Guide(description: "Explicação didática em português do que esse trecho faz e por quê")
+    var explanation: String
 }
 
 @Generable
