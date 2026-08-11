@@ -161,9 +161,9 @@ final class TopicRepository {
         // Hotfix pós-teste: pedir o alvo inteiro (6) numa chamada só fazia o
         // StudyGenerator completar item a item, SEM limite, sempre que o MLX
         // devolvia menos rascunhos que o pedido num lote (visto com o Qwen
-        // 3B em lotes grandes — separador nem sempre respeitado; o 14B atual
-        // segue formato com bem mais consistência, mas o padrão de lotes
-        // pequenos + desistência é mantido como defesa, sem custo real).
+        // 3B em lotes grandes — separador nem sempre respeitado; o Qwen3-Coder
+        // MoE atual segue formato com bem mais consistência, mas o padrão de
+        // lotes pequenos + desistência é mantido como defesa, sem custo real).
         // generateQuizPool/generateCodeAnalysisPool reintroduzem o mesmo
         // padrão de resiliência que já existia em growDifficulty/
         // growCodeAnalysis (lotes pequenos + desistência após 3 lotes

@@ -5,15 +5,18 @@
 //  Created by Geovana Cena de Albuquerque on 05/08/26.
 //
 //  Melhorias desta versão:
-//  - Sobe pro Qwen2.5-Coder-14B-4bit (~8,3 GB): app é exclusivo pra MacBook
-//    com 24 GB de RAM unificada, então cabe com folga (pesos + KV cache
-//    ficam bem abaixo do limite, sobra RAM pro resto do sistema/Xcode). O
-//    14B tem MUITO mais capacidade de seguir instruções complexas (checklist
-//    de erros comuns, não inventar API, respeitar itemSeparator em lotes)
-//    que o 7B (~4,3 GB, usado numa versão anterior) e o 3B-4bit (~1,7 GB,
-//    usado numa versão ainda anterior). Trade-off: download maior e geração
-//    mais lenta por item — mitigado pelos lotes pequenos (≤3) com desistência
-//    do TopicRepository (Plano V4, hotfix pós-teste).
+//  - Sobe pro Qwen3-Coder-30B-A3B-Instruct-4bit (~17,2 GB): app é exclusivo
+//    pra MacBook com 24 GB de RAM unificada, então cabe com folga. É MoE —
+//    30B de parâmetros totais mas só ~3B ATIVOS por token — então a
+//    velocidade de geração fica perto de um denso pequeno, mesmo com um
+//    download bem maior. Geração Qwen3 (mais nova que a linha 2.5 usada nas
+//    versões anteriores: 3B-4bit ~1,7 GB, 7B-4bit ~4,3 GB, 14B-4bit ~8,3 GB),
+//    treinada especificamente pra coding/agentic — segue instruções
+//    complexas (checklist de erros comuns, não inventar API, respeitar
+//    itemSeparator em lotes) com bem mais consistência que a linha 2.5.
+//    Suporte oficial confirmado no mlx-swift-lm via LLMTypeRegistry
+//    "qwen3_moe". Trade-off: download maior — mitigado pelos lotes pequenos
+//    (≤3) com desistência do TopicRepository (Plano V4, hotfix pós-teste).
 //  - Progresso de download real (fração + velocidade + ETA) exposto de
 //    forma observável — ver ModelDownloadView.
 //  - Geração de rascunhos em LOTE (generateQuestionDrafts): um único
@@ -31,15 +34,16 @@ final class MLXService {
     static let shared = MLXService()
 
     /// ID do modelo no Hugging Face (mlx-community). Constante separada de
-    /// propósito: facilita A/B com o 1.5B/3B/7B (menores, mais rápidos,
-    /// usados em versões anteriores). App é Mac-only com 24 GB de RAM, então
-    /// sobe pro 14B — ver comentário do cabeçalho do arquivo.
-    static let modelID = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+    /// propósito: facilita A/B com o 1.5B/3B/7B/14B da linha Qwen2.5-Coder
+    /// (menores, mais rápidos, usados em versões anteriores). App é Mac-only
+    /// com 24 GB de RAM, então sobe pro Qwen3-Coder MoE 30B-A3B — ver
+    /// comentário do cabeçalho do arquivo.
+    static let modelID = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
 
     /// Tamanho aproximado do download (usado pra estimar MB e velocidade —
-    /// o progress do Hub reporta fração, não bytes). 8,31 GB confirmado na
+    /// o progress do Hub reporta fração, não bytes). 17,2 GB confirmado na
     /// página do modelo no Hugging Face.
-    static let estimatedModelBytes: Int64 = 8_310_000_000
+    static let estimatedModelBytes: Int64 = 17_200_000_000
 
     /// Linha separadora usada nos prompts/parse de geração em lote.
     static let itemSeparator = "====="

@@ -78,7 +78,7 @@ struct TopicStudyView: View {
         Group {
             // MLXService é @Observable — só referenciar `loadState` aqui já
             // faz essa View reagir automaticamente às mudanças. Na primeira
-            // execução (download de ~8,3 GB), a ModelDownloadView mostra
+            // execução (download de ~17,2 GB), a ModelDownloadView mostra
             // progresso real, velocidade e tempo restante estimado.
             switch MLXService.shared.loadState {
             case .downloading, .loadingIntoMemory, .failed:
