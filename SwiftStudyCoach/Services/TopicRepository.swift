@@ -14,6 +14,21 @@
 import Foundation
 import SwiftData
 
+enum TopicRepositoryError: LocalizedError {
+    /// A Task de geração terminou sem lançar erro, mas o fetch local não
+    /// achou o StudyTopic persistido pro tópico — defensivo, não deveria
+    /// acontecer na prática (generateAndPersist sempre persiste antes de
+    /// retornar), mas evita um crash silencioso se acontecer.
+    case generationDidNotPersist(topic: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .generationDidNotPersist(let topic):
+            return "A geração de '\(topic)' terminou mas o resultado não foi encontrado no cache local."
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class TopicRepository {
@@ -29,8 +44,13 @@ final class TopicRepository {
     /// duas vezes pro mesmo tópico) — as duas competiam pela mesma fila do
     /// GenerationOrchestrator, dobrando o trabalho e parecendo travado.
     /// Mesmo padrão de Task compartilhada já usado em MLXService.loadModel
-    /// e DocumentIndex.ensureReady.
-    private var inFlightGenerations: [String: Task<StudyTopic, Error>] = [:]
+    /// e DocumentIndex.ensureReady. Guarda só `Void` (não `StudyTopic`) —
+    /// `StudyTopic` é um `@Model` do SwiftData, e `PersistentModel`s não são
+    /// `Sendable` (erro real do Swift 6 strict concurrency: "Conformance of
+    /// StudyTopic to Sendable is unavailable"). A Task só sinaliza
+    /// "terminou"; cada chamador refaz o fetch local (MainActor, sem cruzar
+    /// isolamento) depois de esperar.
+    private var inFlightGenerations: [String: Task<Void, Error>] = [:]
 
     // Tamanho alvo do pool de quiz por dificuldade (24 no total — Plano V3
     // 1.1: cortado de 53 pra 24, ~2 sessões sem repetição perceptível antes
@@ -120,16 +140,27 @@ final class TopicRepository {
     /// Envolve `generateAndPersist` com deduplicação por tópico (ver
     /// comentário de `inFlightGenerations`): se já existe uma geração em
     /// andamento pro MESMO nome, a chamada nova aguarda a MESMA Task em vez
-    /// de disparar um ciclo completo de geração duplicado.
+    /// de disparar um ciclo completo de geração duplicado. A Task em si só
+    /// sinaliza conclusão (`Void`) — depois de esperar, cada chamador refaz
+    /// o fetch local do `StudyTopic` já persistido (evita cruzar um
+    /// `PersistentModel`, que não é `Sendable`, pela fronteira da Task).
     private func generateAndPersistDeduped(topic: String) async throws -> StudyTopic {
         if let existingTask = inFlightGenerations[topic] {
             print("🟡 fetchOrCreate: geração já em andamento para '\(topic)' — aguardando a MESMA Task em vez de duplicar.")
-            return try await existingTask.value
+            try await existingTask.value
+        } else {
+            let task = Task {
+                _ = try await generateAndPersist(topic: topic)
+            }
+            inFlightGenerations[topic] = task
+            defer { inFlightGenerations[topic] = nil }
+            try await task.value
         }
-        let task = Task { try await generateAndPersist(topic: topic) }
-        inFlightGenerations[topic] = task
-        defer { inFlightGenerations[topic] = nil }
-        return try await task.value
+
+        guard let studyTopic = try fetchExisting(topic: topic) else {
+            throw TopicRepositoryError.generationDidNotPersist(topic: topic)
+        }
+        return studyTopic
     }
 
     private func generateAndPersist(topic: String) async throws -> StudyTopic {

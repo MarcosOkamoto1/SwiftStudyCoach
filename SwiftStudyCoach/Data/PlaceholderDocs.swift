@@ -49,7 +49,15 @@ enum TrackBlock: Int, CaseIterable, Hashable {
 
 enum PlaceholderDocs {
 
-    static let rawChunks: [(topic: String, block: TrackBlock, text: String)] = [
+    // `nonisolated` (Plano V5, hotfix de build Swift 6): sem isso, o
+    // isolamento padrão do projeto (MainActor) torna essa constante
+    // inacessível como valor-padrão de parâmetro em
+    // DocumentIndex.buildIndex, que roda fora do MainActor — erro real do
+    // Swift 6 strict concurrency ("Main actor-isolated static property
+    // 'rawChunks' can not be referenced from a nonisolated context"). É só
+    // dado estático puro, sem estado de UI, então não precisa de
+    // isolamento nenhum.
+    nonisolated static let rawChunks: [(topic: String, block: TrackBlock, text: String)] = [
 
         // MARK: - NavigationStack (Bloco 3 — SwiftUI)
         // Fonte: https://developer.apple.com/documentation/swiftui/navigationstack
