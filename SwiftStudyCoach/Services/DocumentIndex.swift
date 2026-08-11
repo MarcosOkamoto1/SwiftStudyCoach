@@ -19,6 +19,10 @@
 //    curto-circuito "tudo ou nada".
 //  - Threshold adaptativo: relaxa o corte antes de devolver contexto vazio
 //    (contexto vazio silencioso = modelo alucinando sem grounding).
+//  - Overlap léxico ignora stopwords em português (Plano V5): sem isso,
+//    palavras funcionais como "que" contavam como hit em qualquer chunk,
+//    comprimindo a diferença de score entre o tópico certo e um tópico
+//    qualquer do mesmo domínio no hybridSearch.
 //
 
 import Foundation
@@ -209,11 +213,31 @@ final class DocumentIndex {
             .replacingOccurrences(of: " ", with: "")
     }
 
+    /// Palavras funcionais em português que aparecem em praticamente
+    /// qualquer chunk, independente do tópico ("que", "para", "com"...).
+    /// Sem filtrar isso, uma query como "o que é @State" tinha "que" contado
+    /// como hit léxico em TODO chunk (não só no de Property Wrappers),
+    /// inflando o overlap de tópicos errados e comprimindo a diferença de
+    /// score entre o chunk certo e um chunk qualquer do mesmo domínio —
+    /// exatamente o cenário visto no RAGTestView (async/await a 0.02 de
+    /// distância de Property Wrappers pra uma query sobre @State).
+    private static let stopwords: Set<String> = [
+        "que", "de", "da", "do", "das", "dos", "para", "por", "com", "sem",
+        "uma", "um", "uns", "umas", "os", "as", "sao", "ser", "estar",
+        "tem", "ter", "mais", "menos", "como", "quando", "onde", "qual",
+        "quais", "isso", "isto", "essa", "esse", "essas", "esses", "sua",
+        "seu", "suas", "seus", "pelo", "pela", "pelos", "pelas", "num",
+        "numa", "nos", "nas", "ele", "ela", "eles", "elas", "voce", "voces",
+        "seja", "entre", "outro", "outra", "outros", "outras", "cada",
+        "assim", "ainda", "muito", "muita", "muitos", "muitas", "todo",
+        "toda", "todos", "todas", "mesmo", "mesma",
+    ]
+
     private static func tokens(of text: String) -> Set<String> {
         Set(
             text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { $0.count > 2 }
+                .filter { $0.count > 2 && !stopwords.contains($0) }
         )
     }
 
