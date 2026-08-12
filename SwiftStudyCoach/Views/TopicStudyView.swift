@@ -8,6 +8,11 @@
 //  cache/persistência e o StudyGenerator (Parte 6) pro feedback final.
 //  Plano V3 1.3: flashcards saíram — redundantes com o quiz.
 //
+//  PLAN_06: o loading deixou de ser binário. O texto do spinner vem de
+//  `GenerationStage` (§16.1) e muda a cada etapa da Fase 1; o que a Fase 2
+//  está fazendo (ou falhou em fazer) aparece como indicador compacto ao
+//  lado do artigo, sem nunca derrubar a tela pro `errorState` (§16.5).
+//
 
 import SwiftUI
 import SwiftData
@@ -74,12 +79,27 @@ struct TopicStudyView: View {
 
     // MARK: - Carregamento
 
+    /// PLAN_06 — etapa corrente da geração deste tópico. `GenerationStageStore`
+    /// é `@Observable`, então só ler isto aqui já faz a View re-renderizar a
+    /// cada troca de etapa, sem polling (mesmo mecanismo do
+    /// `MLXService.loadState` logo abaixo).
+    private var stage: GenerationStage {
+        GenerationStageStore.shared.stage(for: topicName)
+    }
+
     private var loadingState: some View {
         Group {
             // MLXService é @Observable — só referenciar `loadState` aqui já
             // faz essa View reagir automaticamente às mudanças. Na primeira
             // execução (download de ~4,3 GB), a ModelDownloadView mostra
             // progresso real, velocidade e tempo restante estimado.
+            //
+            // PLAN_06: na prática este caso ficou raro na ABERTURA de um
+            // tópico novo — a Fase 1 não carrega mais o MLX, então o download
+            // acontece com o artigo já visível (banner compacto em
+            // `articleContent`). Mantido como defesa para os caminhos que
+            // ainda podem cair aqui (ex.: retomada de pool incompleto num
+            // cache HIT antes da tela renderizar).
             switch MLXService.shared.loadState {
             case .downloading, .loadingIntoMemory, .failed:
                 ModelDownloadView {
@@ -88,9 +108,15 @@ struct TopicStudyView: View {
             case .idle, .ready:
                 VStack(spacing: 14) {
                     ProgressView().tint(DS.Colors.violet)
-                    Text("Gerando conteúdo de \"\(topicName)\"...")
+                    // Antes: texto fixo "Gerando conteúdo de '<tópico>'...".
+                    // Agora derivado de GenerationStage (§16.1/§16.3) — o
+                    // usuário vê "Gerando o resumo...", "Preparando as
+                    // perguntas fáceis...", etc.
+                    Text(stage.loadingText(topicName: topicName))
                         .font(DS.Fonts.body(14))
                         .foregroundStyle(DS.Colors.mist)
+                        .multilineTextAlignment(.center)
+                        .animation(.easeInOut(duration: 0.2), value: stage)
                 }
             }
         }
@@ -120,7 +146,20 @@ struct TopicStudyView: View {
 
         do {
             if repository == nil {
-                try await documentIndex.ensureReady()
+                // PLAN_04: não aguarda mais `ensureReady()` aqui — o caminho
+                // de tópico exato (StudyGenerator.retrieveContext) não
+                // depende do índice de embeddings. Dispara a construção do
+                // índice em paralelo (fire-and-forget) só para já cobrir,
+                // mais tarde na mesma sessão, os casos raros que precisarem
+                // do caminho fuzzy (recomendação de próximo tópico via
+                // StudyResultView, RAGTestView) — sem bloquear a abertura
+                // desta tela. O dedup existente de `ensureReady()`
+                // (`buildTask` compartilhada em DocumentIndex) garante que
+                // isso não dispara uma indexação duplicada quando esses
+                // outros caminhos chamarem `ensureReady()` por conta própria.
+                Task.detached(priority: .utility) {
+                    try? await DocumentIndex.shared.ensureReady()
+                }
                 let gen = StudyGenerator(documentIndex: documentIndex)
                 generator = gen
                 repository = TopicRepository(modelContext: modelContext, generator: gen)
@@ -154,14 +193,7 @@ struct TopicStudyView: View {
                 HStack(spacing: 12) {
                     PillView(text: "\(topic.quizPool.count) no pool de quiz", borderColor: DS.Colors.hairline)
                     PillView(text: "\(topic.codeAnalysisPool.count) análise de código", borderColor: DS.Colors.hairline)
-                    if topic.isGeneratingPool {
-                        HStack(spacing: 5) {
-                            ProgressView().scaleEffect(0.6).tint(DS.Colors.violet)
-                            Text("crescendo em background")
-                                .font(DS.Fonts.mono(10.5))
-                                .foregroundStyle(DS.Colors.mistDim)
-                        }
-                    }
+                    backgroundStatusBadge(topic)
                 }
                 .padding(.bottom, 32)
 
@@ -219,6 +251,39 @@ struct TopicStudyView: View {
             .padding(28)
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// PLAN_06 (§16.4/§16.5) — indicador compacto do que a FASE 2 está
+    /// fazendo, ao lado do artigo já renderizado.
+    ///
+    /// Uma falha de Fase 2 aparece AQUI, como aviso silencioso, e nunca como
+    /// `errorState`: o conteúdo da Fase 1 (resumo, pontos-chave, exemplo,
+    /// quiz fácil/média) continua válido e visível, e `topic` nunca é
+    /// limpo. Os botões de sessão já se desabilitam sozinhos enquanto o pool
+    /// correspondente estiver vazio (ver `actionGrid`).
+    @ViewBuilder
+    private func backgroundStatusBadge(_ topic: StudyTopic) -> some View {
+        if let text = stage.backgroundText {
+            HStack(spacing: 5) {
+                if stage.isFailure {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(DS.Colors.orchid)
+                } else {
+                    ProgressView().scaleEffect(0.6).tint(DS.Colors.violet)
+                }
+                Text(text)
+                    .font(DS.Fonts.mono(10.5))
+                    .foregroundStyle(DS.Colors.mistDim)
+            }
+        } else if topic.isGeneratingPool {
+            HStack(spacing: 5) {
+                ProgressView().scaleEffect(0.6).tint(DS.Colors.violet)
+                Text("crescendo em background")
+                    .font(DS.Fonts.mono(10.5))
+                    .foregroundStyle(DS.Colors.mistDim)
+            }
         }
     }
 
@@ -296,12 +361,17 @@ struct TopicStudyView: View {
 
                 actionRow(
                     title: "Análise de código",
-                    subtitle: "\(topic.codeAnalysisPool.count) perguntas",
+                    subtitle: codeAnalysisSubtitle(topic),
                     icon: "curlybraces",
                     color: DS.Colors.orchid
-                ) { activeSheet = .codeAnalysis }
-                .disabled(topic.codeAnalysisPool.isEmpty)
-                .opacity(topic.codeAnalysisPool.isEmpty ? 0.4 : 1)
+                ) { openCodeAnalysis(topic) }
+                // PLAN_10: pool vazio deixou de significar "indisponível pra
+                // sempre" — agora é o estado NORMAL até o 1º toque, que
+                // dispara `ensureCodeAnalysisPool`. Só fica desabilitado/opaco
+                // ENQUANTO essa geração sob demanda está rodando (evita 2º
+                // toque disparar uma segunda geração em paralelo).
+                .disabled(topic.codeAnalysisPool.isEmpty && stage == .generatingCodeAnalysis)
+                .opacity(topic.codeAnalysisPool.isEmpty && stage == .generatingCodeAnalysis ? 0.4 : 1)
 
                 if !quizAnswers.isEmpty || !codeAnswers.isEmpty {
                     actionRow(
@@ -369,6 +439,42 @@ struct TopicStudyView: View {
                     generator: generator,
                     onSelectTopic: { name in recommendedTopicToOpen = name }
                 )
+            }
+        }
+    }
+
+    /// PLAN_10 — texto do botão de "Análise de código" nos três estados
+    /// possíveis: nunca aberto (pool vazio, parado), gerando sob demanda
+    /// (pool vazio, `.generatingCodeAnalysis`) e disponível (pool com itens).
+    private func codeAnalysisSubtitle(_ topic: StudyTopic) -> String {
+        if !topic.codeAnalysisPool.isEmpty {
+            return "\(topic.codeAnalysisPool.count) perguntas"
+        }
+        if stage == .generatingCodeAnalysis {
+            return "gerando..."
+        }
+        return "toque para gerar"
+    }
+
+    /// PLAN_10 — gatilho de geração sob demanda do pool de análise de
+    /// código: no 1º toque, se o pool ainda estiver vazio, dispara
+    /// `ensureCodeAnalysisPool` (prioridade `.userBlocking`, ver
+    /// `TopicRepository`) em vez de abrir o sheet direto. Enquanto isso
+    /// roda, `GenerationStage.generatingCodeAnalysis` cobre o loading (badge
+    /// de background + botão desabilitado/opaco, ver `actionGrid`). Quando
+    /// termina, `topic.codeAnalysisPool` é o MESMO objeto observado por esta
+    /// View (patch aplicado por `PersistentIdentifier`, mesmo padrão do
+    /// resto do crescimento de pool) — se veio algo, o sheet abre sozinho.
+    private func openCodeAnalysis(_ topic: StudyTopic) {
+        guard topic.codeAnalysisPool.isEmpty else {
+            activeSheet = .codeAnalysis
+            return
+        }
+        guard let repository, stage != .generatingCodeAnalysis else { return }
+        Task {
+            await repository.ensureCodeAnalysisPool(topicName: topicName)
+            if !topic.codeAnalysisPool.isEmpty {
+                activeSheet = .codeAnalysis
             }
         }
     }

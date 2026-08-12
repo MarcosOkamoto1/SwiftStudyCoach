@@ -51,6 +51,32 @@ final class MLXService {
     /// Linha separadora usada nos prompts/parse de geração em lote.
     static let itemSeparator = "====="
 
+    /// PLAN_11 — liga/desliga o cache de prefixo MLX.
+    ///
+    /// Este é o ROLLBACK do plano, na forma de 1 linha: com `false`, o
+    /// `cache:` passado a `MLXLMCommon.generate` volta a ser `nil` e o
+    /// comportamento é EXATAMENTE o de antes do PLAN_11 (cada chamada cria
+    /// seu próprio `KVCacheSimple`). Também é o interruptor que o
+    /// `PromptCacheBenchmark` usa para medir o mesmo prompt com e sem
+    /// cache.
+    ///
+    /// `nonisolated(unsafe)`: é uma alavanca de diagnóstico/benchmark,
+    /// escrita só pelo benchmark (que roda serialmente) e lida pelo caminho
+    /// de geração. Não vale a pena um `actor` para um `Bool` de rollback.
+    nonisolated(unsafe) static var isPromptCacheEnabled = true
+
+    /// PLAN_11 — system prompt ÚNICO para as 3 tarefas de rascunho MLX.
+    ///
+    /// §7.2.1 recomendava a opção (a): unificar os 3 system prompts, que
+    /// hoje diferem em uma frase ("Gere um código de exemplo…" vs. "Gere
+    /// perguntas técnicas difíceis…" vs. "Gere trechos de código e
+    /// perguntas de análise…"), e mover a instrução ESPECÍFICA da tarefa
+    /// para o `promptContext` — que já é o texto que muda a cada chamada.
+    /// Assim o prefixo cacheável cobre o system prompt INTEIRO, não só o
+    /// pedaço até a primeira palavra divergente.
+    static let draftSystemPrompt =
+        "Você é um especialista em Swift, ajudando a gerar material de estudo sobre um tópico específico. Responda sempre em texto puro, sem markdown e sem JSON, usando apenas APIs reais."
+
     /// Pasta local opcional com os pesos já baixados manualmente, ex:
     /// `hf download mlx-community/Qwen2.5-Coder-7B-Instruct-4bit --local-dir ~/mlx-models/qwen2.5-coder-7b-instruct-4bit`
     /// O nome da pasta é derivado do `modelID` (repo em minúsculas), então
@@ -237,13 +263,21 @@ final class MLXService {
     /// `topic`/`taskType` (PLAN_00) são só para instrumentação — identificam
     /// a métrica gerada por esta chamada, sem afetar o prompt nem o
     /// resultado.
+    /// `cacheTopic` (PLAN_11): quando presente, liga o cache de prefixo para
+    /// este tópico — as chamadas seguintes com o MESMO `cacheTopic` e o mesmo
+    /// `systemPrompt` reaproveitam o prefill do trecho inicial comum.
+    /// Deliberadamente separado de `topic` (que é só instrumentação, e por
+    /// isso tem default `""`): ligar cache é uma decisão de comportamento, e
+    /// deve ser explícita no chamador.
     func generateQuestionDraft(
         systemPrompt: String,
         promptContext: String,
         topic: String = "",
-        taskType: GenerationMetrics.TaskType = .hardQuizDraft
+        taskType: GenerationMetrics.TaskType = .hardQuizDraft,
+        cacheTopic: String? = nil,
+        temperatureOverride: Float? = nil
     ) async throws -> String {
-        try await generate(systemPrompt: systemPrompt, promptContext: promptContext, maxTokens: 350, topic: topic, taskType: taskType, batchSize: 1)
+        try await generate(systemPrompt: systemPrompt, promptContext: promptContext, maxTokens: 350, topic: topic, taskType: taskType, batchSize: 1, cacheTopic: cacheTopic, temperatureOverride: temperatureOverride)
     }
 
     /// Gera N rascunhos numa ÚNICA chamada ao modelo (um prefill só), com os
@@ -256,10 +290,11 @@ final class MLXService {
         promptContext: String,
         count: Int,
         topic: String = "",
-        taskType: GenerationMetrics.TaskType = .hardQuizDraft
+        taskType: GenerationMetrics.TaskType = .hardQuizDraft,
+        cacheTopic: String? = nil
     ) async throws -> [String] {
         guard count > 1 else {
-            return [try await generateQuestionDraft(systemPrompt: systemPrompt, promptContext: promptContext, topic: topic, taskType: taskType)]
+            return [try await generateQuestionDraft(systemPrompt: systemPrompt, promptContext: promptContext, topic: topic, taskType: taskType, cacheTopic: cacheTopic)]
         }
 
         let output = try await generate(
@@ -268,7 +303,8 @@ final class MLXService {
             maxTokens: 300 * count + 50,
             topic: topic,
             taskType: taskType,
-            batchSize: count
+            batchSize: count,
+            cacheTopic: cacheTopic
         )
 
         let items = output
@@ -357,19 +393,84 @@ final class MLXService {
         }
     }
 
+    /// Resultado da preparação do prompt dentro de `container.perform` — o
+    /// stream em si mais o que precisamos saber sobre o cache de prefixo
+    /// para instrumentar (PLAN_11) e para guardar o cache primed DEPOIS que
+    /// a geração terminar.
+    ///
+    /// `nonisolated` + `Sendable`: é construído DENTRO do closure `@Sendable`
+    /// de `ModelContainer.perform` (fora do MainActor) e devolvido para o
+    /// MainActor. Sem isso ele herdaria o `SWIFT_DEFAULT_ACTOR_ISOLATION =
+    /// MainActor` do projeto e não poderia ser criado lá dentro. Todos os
+    /// campos são Sendable de fato (`Generation` é `Sendable`; o
+    /// `TopicPromptCache` documenta o próprio `@unchecked`).
+    private nonisolated struct PreparedGeneration: Sendable {
+        let stream: AsyncStream<Generation>
+        let cacheState: GenerationMetrics.CacheState
+        /// Tokens de prefixo reaproveitados do cache (0 num miss, `nil` se o
+        /// cache não se aplica a esta chamada).
+        let cachedPrefixTokenCount: Int?
+        /// Preenchido só num MISS: o cache que esta chamada acabou de criar,
+        /// para ser guardado no store assim que a geração terminar (aí sim
+        /// ele contém o prompt inteiro já processado).
+        let primedToStore: TopicPromptCache?
+    }
+
     private func generate(
         systemPrompt: String,
         promptContext: String,
         maxTokens: Int,
         topic: String = "",
         taskType: GenerationMetrics.TaskType = .hardQuizDraft,
-        batchSize: Int = 1
+        batchSize: Int = 1,
+        cacheTopic: String? = nil,
+        temperatureOverride: Float? = nil
     ) async throws -> String {
         guard let container = modelContainer else {
             throw NSError(domain: "MLXService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Modelo MLX não carregado."])
         }
 
-        let generateParams = GenerateParameters(maxTokens: maxTokens, temperature: 0.3, repetitionPenalty: 1.1)
+        // PLAN_11 — `temperatureOverride` existe por causa do TESTE DE
+        // EQUIVALÊNCIA exigido por §7.4 ("o texto gerado com e sem cache
+        // deveria ser idêntico").
+        //
+        // Com a temperatura de produção (0.3), `GenerateParameters.sampler()`
+        // devolve um `CategoricalSampler`, que carrega o próprio
+        // `MLXRandom.RandomState` criado na hora — ou seja, DUAS execuções do
+        // mesmo prompt, sem cache nenhum, já produzem textos diferentes. Um
+        // teste de equivalência nessas condições mediria o amostrador, não o
+        // cache.
+        //
+        // Com `temperature: 0`, o mesmo `sampler()` devolve `ArgMaxSampler`,
+        // que é determinístico — aí uma diferença de texto entre com/sem
+        // cache aponta de verdade para o cache. Só o benchmark passa este
+        // parâmetro; o caminho de produção continua em 0.3.
+        let generateParams = GenerateParameters(
+            maxTokens: maxTokens,
+            temperature: temperatureOverride ?? 0.3,
+            repetitionPenalty: 1.1
+        )
+
+        // PLAN_11 — chave do cache de prefixo. `nil` desliga o cache para
+        // esta chamada (flag global desligada, ou chamador que não passou
+        // `cacheTopic` — ex.: o benchmark de modelos, que quer medir prefill
+        // limpo).
+        let cacheKey: String? = {
+            guard Self.isPromptCacheEnabled, let cacheTopic, !cacheTopic.isEmpty else { return nil }
+            return MLXPromptCacheStore.cacheKey(topic: cacheTopic, systemPrompt: systemPrompt, modelID: Self.modelID)
+        }()
+
+        // `let` (e não `var`) de propósito: esta variável é capturada pelo
+        // closure `@Sendable` de `container.perform` logo abaixo, e capturar
+        // uma `var` mutável em código que roda concorrentemente é erro de
+        // concorrência no Swift. A inicialização adiada em ramos mantém o
+        // valor imutável.
+        let existingPrimed: TopicPromptCache?
+        if let cacheKey {
+            existingPrimed = await MLXPromptCacheStore.shared.cached(matching: cacheKey)
+        } else {
+            existingPrimed = nil
+        }
 
         // PLAN_00: "1ª geração depois do load" — aproximação de cold start
         // de INFERÊNCIA (compilação de kernels Metal), distinta do cold
@@ -380,8 +481,19 @@ final class MLXService {
         let isColdStart = !hasGeneratedSinceLoad
         hasGeneratedSinceLoad = true
 
+        // PLAN_12 — `GPU.snapshot()` (API real: `activeMemory`, `cacheMemory`,
+        // `peakMemory`, todos em bytes) antes/depois desta geração. Usamos
+        // `activeMemory + cacheMemory` como uma única cifra de "memória GPU
+        // em uso neste instante" (memória ativa da computação + buffers
+        // mantidos no pool de reuso) — é o par de campos que
+        // `GenerationMetrics.memoryBeforeBytes`/`memoryAfterBytes` já previa
+        // desde o PLAN_00, deixados `nil` até este plano. Não afeta o
+        // comportamento de geração em nada — só leitura.
+        let memoryBefore = GPU.snapshot()
+        let memoryBeforeBytes = memoryBefore.activeMemory + memoryBefore.cacheMemory
+
         let start = Date()
-        let stream = try await container.perform { context in
+        let prepared = try await container.perform { context -> PreparedGeneration in
             // PLAN_03: antes disso, o `system`/`user` eram concatenados à mão
             // numa string ChatML (`<|im_start|>...`) e passados como o
             // CONTEÚDO de uma única mensagem `.user` via `UserInput(prompt:)`.
@@ -403,12 +515,103 @@ final class MLXService {
                 .user(promptContext),
             ])
             let input = try await context.processor.prepare(input: userInput)
-            return try MLXLMCommon.generate(input: input, parameters: generateParams, context: context)
+
+            // ── PLAN_11 — cache de prefixo ────────────────────────────────
+            // Sem chave (ou com entrada multimodal, que este fluxo não usa),
+            // o comportamento é literalmente o de antes: `cache: nil`.
+            guard let cacheKey, input.text.mask == nil, input.image == nil, input.video == nil else {
+                return PreparedGeneration(
+                    stream: try MLXLMCommon.generate(input: input, parameters: generateParams, context: context),
+                    cacheState: .notApplicable,
+                    cachedPrefixTokenCount: nil,
+                    primedToStore: nil
+                )
+            }
+
+            let fullTokens = input.text.tokens.asArray(Int.self)
+
+            // ── HIT ───────────────────────────────────────────────────────
+            // Mede o prefixo comum EM TOKENS com o que já está primed e
+            // manda para o modelo só o que sobra. Passar o prompt inteiro
+            // aqui seria o bug descrito no topo de MLXPromptCache.swift.
+            if let existingPrimed {
+                let common = MLXPromptCacheStore.sharedPrefixLength(existingPrimed.prefixTokens, fullTokens)
+                // Deixa SEMPRE pelo menos 1 token de sufixo: o
+                // `TokenIterator` precisa de algo para processar e para tirar
+                // o primeiro logit. Um prompt 100% cacheado (raro, mas
+                // possível se a mesma chamada se repetir) viraria um input
+                // vazio.
+                let reusable = min(common, fullTokens.count - 1)
+
+                if reusable > 0, let clonedCache = existingPrimed.clone(upTo: reusable) {
+                    // `LMInput(tokens:)` é o init público usado pela própria
+                    // lib (ver o `generate` legado em Evaluate.swift). `mask`
+                    // fica nil, o que é correto aqui: o guard acima já provou
+                    // que o input original não tinha máscara.
+                    let suffix = LMInput(tokens: input.text.tokens[reusable...])
+                    let stream = try MLXLMCommon.generate(
+                        input: suffix, cache: clonedCache, parameters: generateParams, context: context
+                    )
+                    return PreparedGeneration(
+                        stream: stream,
+                        cacheState: .hit,
+                        cachedPrefixTokenCount: reusable,
+                        primedToStore: nil
+                    )
+                }
+            }
+
+            // ── MISS ──────────────────────────────────────────────────────
+            // Esta chamada roda o prompt inteiro, como sempre — mas com um
+            // cache NOSSO, que fica guardado depois em vez de ser jogado
+            // fora.
+            //
+            // DESVIO (proposital) de SOLUTIONS_PLAN.md §7.2: o plano previa
+            // um passo `prefillOnly(prefix:)` separado, e marcava com ⚠️ a
+            // dúvida de "`TokenIterator` aceita `maxTokens: 0`?". Esse passo
+            // é desnecessário. A 1ª chamada do tópico JÁ processa o prefixo
+            // — basta não descartar o cache dela. Isso elimina de uma vez o
+            // item que precisava de protótipo, a passada extra de prefill e
+            // o token descartado (que, aliás, teria que ser excluído do
+            // prefixo reutilizável, por ser um token AMOSTRADO e não um
+            // token de prompt).
+            let freshCache = makePromptCache(model: context.model, parameters: generateParams)
+            let simpleCaches = freshCache.compactMap { $0 as? KVCacheSimple }
+
+            // `newCache` devolve `KVCacheSimple` quando `maxKVSize == nil`
+            // (é o nosso caso — ver `GenerateParameters` acima). Se algum dia
+            // deixar de ser (`RotatingKVCache` rotaciona e descarta tokens
+            // antigos, então clonar por fatia não faria sentido), a decisão
+            // segura é seguir sem cache em vez de clonar um tipo cujo
+            // contrato de crescimento não conhecemos.
+            guard !freshCache.isEmpty, simpleCaches.count == freshCache.count else {
+                print("⚪️ PLAN_11: makePromptCache devolveu um tipo de cache não suportado — seguindo sem cache de prefixo.")
+                return PreparedGeneration(
+                    stream: try MLXLMCommon.generate(input: input, parameters: generateParams, context: context),
+                    cacheState: .notApplicable,
+                    cachedPrefixTokenCount: nil,
+                    primedToStore: nil
+                )
+            }
+
+            let stream = try MLXLMCommon.generate(
+                input: input, cache: freshCache, parameters: generateParams, context: context
+            )
+            return PreparedGeneration(
+                stream: stream,
+                cacheState: .miss,
+                cachedPrefixTokenCount: 0,
+                // Mesmas instâncias que o `TokenIterator` vai preencher: ao
+                // fim da geração elas contêm o prompt inteiro (e mais os
+                // tokens gerados, que `clone(upTo:)` nunca alcança porque
+                // `reusableTokenCount` é o tamanho do PROMPT).
+                primedToStore: TopicPromptCache(key: cacheKey, prefixTokens: fullTokens, caches: simpleCaches)
+            )
         }
 
         var outputText = ""
         var completionInfo: GenerateCompletionInfo?
-        for try await generation in stream {
+        for try await generation in prepared.stream {
             switch generation {
             case .chunk(let chunk):
                 outputText.append(chunk)
@@ -425,8 +628,42 @@ final class MLXService {
         }
 
         let elapsedMs = Date().timeIntervalSince(start) * 1000
+
+        // PLAN_11 — só agora, com o stream drenado, o cache contém o prompt
+        // inteiro processado. Guardar antes disso salvaria um cache pela
+        // metade (o `AsyncStream` só roda durante o consumo — mesma razão
+        // pela qual o snapshot de memória do PLAN_12 é tirado aqui embaixo).
+        if let primed = prepared.primedToStore {
+            await MLXPromptCacheStore.shared.store(primed)
+        }
+
+        // PLAN_12 — snapshot "depois", mesmo par de campos do "antes" acima.
+        // Tirado DEPOIS de drenar o stream (não logo após `container.perform`
+        // retornar) porque a geração de fato acontece durante o consumo do
+        // `AsyncSequence` — antes disso o snapshot capturaria só o prefill.
+        let memoryAfter = GPU.snapshot()
+        let memoryAfterBytes = memoryAfter.activeMemory + memoryAfter.cacheMemory
+
+        let memoryDeltaMB = Double(memoryAfterBytes - memoryBeforeBytes) / 1_048_576
+
+        // PLAN_11 — num HIT, `info.promptTokenCount` conta só o SUFIXO que
+        // passou pelo TokenIterator. Logar os dois números lado a lado evita
+        // ler "o prompt encolheu" onde na verdade é "o prefixo veio do
+        // cache".
+        let cacheSuffix: String = {
+            switch prepared.cacheState {
+            case .hit:
+                let reused = prepared.cachedPrefixTokenCount ?? 0
+                return " · prefixo em cache HIT (\(reused) tokens reaproveitados)"
+            case .miss:
+                return " · prefixo em cache MISS (primed para as próximas chamadas deste tópico)"
+            case .notApplicable:
+                return ""
+            }
+        }()
+
         if let info = completionInfo {
-            print("⏱️ MLXService.generate: \(info.summary().replacingOccurrences(of: "\n", with: " · "))")
+            print("⏱️ MLXService.generate: \(info.summary().replacingOccurrences(of: "\n", with: " · ")) · GPU Δ\(String(format: "%.1f", memoryDeltaMB))MB (cache=\(memoryAfter.cacheMemory / 1_048_576)MB)\(cacheSuffix)")
         } else {
             // Defensivo: a variante em stream sempre emite `.info` ao
             // terminar (ver Evaluate.swift), mas se por algum motivo não
@@ -446,7 +683,11 @@ final class MLXService {
             decodeTimeMs: completionInfo.map { $0.generateTime * 1000 },
             totalTimeMs: elapsedMs,
             tokensPerSecond: completionInfo?.tokensPerSecond,
-            batchSize: batchSize
+            batchSize: batchSize,
+            promptCacheState: prepared.cacheState,
+            cachedPrefixTokenCount: prepared.cachedPrefixTokenCount,
+            memoryBeforeBytes: memoryBeforeBytes,
+            memoryAfterBytes: memoryAfterBytes
         )
         Task { await GenerationMetricsStore.shared.record(metric) }
 

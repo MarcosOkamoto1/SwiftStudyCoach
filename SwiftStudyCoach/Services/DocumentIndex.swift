@@ -236,6 +236,20 @@ final class DocumentIndex {
         chunks.filter { $0.topic == topic }
     }
 
+    /// PLAN_04 — mesma busca por igualdade exata de `chunks(forExactTopic:)`,
+    /// mas SÍNCRONA e direta no dataset estático (`PlaceholderDocs.rawChunks`,
+    /// já uma constante sem I/O nem processamento assíncrono), sem depender
+    /// de `ensureReady()`/embeddings de forma alguma. Existe porque o caminho
+    /// de abertura de tela com tópico exato (StudyGenerator.retrieveContext)
+    /// não precisa de embedding nenhum — só o caminho fuzzy (hybridSearch)
+    /// precisa. Mantido como `static` porque não depende de nenhum estado de
+    /// instância (`chunks`/`service`/`isReady`) — é leitura pura do dataset.
+    static func rawChunks(forExactTopic topic: String) -> [(topic: String, text: String)] {
+        PlaceholderDocs.rawChunks
+            .filter { $0.topic == topic }
+            .map { (topic: $0.topic, text: $0.text) }
+    }
+
     /// Recupera o contexto concatenado dos top-k chunks para grounding.
     /// ⚠️ Caminho FUZZY — só para queries de texto livre. Geração interna
     /// (tópico exato conhecido) deve usar `chunks(forExactTopic:)`.

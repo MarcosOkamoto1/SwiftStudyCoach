@@ -17,6 +17,25 @@
 //  - Perguntas difíceis (MLX) agora são geradas em LOTE: um único prefill
 //    do prompt para N rascunhos, em vez de um prefill por pergunta.
 //
+//  PLAN_06 — o exemplo de código SAIU do caminho síncrono do MLX:
+//  `generateCodeExample` (MLX→crítica→formatação) virou duas funções —
+//  `generateCodeExampleFM` (FM-only, síncrona, caminho principal da Fase 1)
+//  e `upgradeCodeExampleViaMLX` (background, stub até PLAN_07). O pipeline
+//  MLX original ficou PRESERVADO em `legacyGenerateCodeExampleViaMLX`,
+//  dormente, como base do PLAN_07 e caminho de rollback.
+//
+//  PLAN_07 — `upgradeCodeExampleViaMLX` deixou de ser stub: roda o MESMO
+//  pipeline MLX→crítica→formatação, agora inteiramente em background
+//  (Estratégia D, SOLUTIONS_PLAN.md §5.2 passos 4-8). A parte de rascunho
+//  MLX, que era literal dentro de `legacyGenerateCodeExampleViaMLX`, foi
+//  extraída para `mlxCodeExampleDraft` e é COMPARTILHADA pelos dois — o
+//  prompt continua byte a byte o mesmo, e o legado segue dormente e
+//  intacto como caminho de rollback. A diferença de comportamento entre os
+//  dois é só o tratamento de falha: o legado cai pro FM-only (fazia
+//  sentido quando ele ERA o caminho principal), o upgrade devolve `nil`
+//  (regenerar FM-only seria refazer exatamente o que a Fase 1 já
+//  persistiu).
+//
 
 import Foundation
 import FoundationModels
@@ -86,12 +105,48 @@ final class StudyGenerator {
     /// cross-topic. Só cai no hybridSearch (fuzzy) se o tópico não
     /// existir literalmente no dataset (defesa; não deveria acontecer,
     /// já que a home deriva os tópicos do próprio dataset).
+    ///
+    /// PLAN_04: o caminho exato agora usa `DocumentIndex.rawChunks(forExactTopic:)`
+    /// — síncrono, direto no dataset estático, SEM depender de `ensureReady()`
+    /// (nem do índice de embeddings de forma alguma). Isso desacopla a
+    /// abertura de tela do build do índice para o caso comum (tópico exato).
+    /// `ensureReady()` só é aguardado no fallback fuzzy abaixo, que de fato
+    /// precisa dos embeddings prontos.
+    /// PLAN_11 — bloco de contexto RAG compartilhado, IDÊNTICO nas 3 chamadas
+    /// MLX de um mesmo tópico (exemplo de código, quiz difícil, análise de
+    /// código).
+    ///
+    /// Duas propriedades importam aqui, e as duas são sobre o cache de
+    /// prefixo:
+    ///
+    /// 1. **Vem primeiro no `promptContext`.** O prefixo reaproveitável é,
+    ///    por definição, um prefixo — o cache só cobre tokens até o ponto em
+    ///    que os prompts divergem. Com a instrução da tarefa na frente (como
+    ///    era antes), a divergência acontecia na PRIMEIRA linha e não sobrava
+    ///    prefixo nenhum além do system prompt. Com o contexto na frente, o
+    ///    trecho comum passa a ser `system prompt + todo o contexto RAG`, que
+    ///    é justamente a parte longa.
+    /// 2. **É montado por uma função só.** Se cada chamada montasse o próprio
+    ///    cabeçalho, uma vírgula de diferença cortaria o prefixo comum ali.
+    ///    Centralizar é o que impede a otimização de se desfazer sozinha na
+    ///    próxima edição de prompt.
+    ///
+    /// O `topic` entra no bloco de propósito: é constante entre as 3 chamadas
+    /// do mesmo tópico (não atrapalha o cache) e mantém o prompt legível.
+    static func mlxContextBlock(topic: String, context: String) -> String {
+        """
+        [Contexto oficial sobre '\(topic)']:
+        \(context.isEmpty ? "Conhecimento geral sobre Swift e Apple Frameworks." : context)
+        """
+    }
+
     func retrieveContext(for topic: String, topK: Int = 3) async -> String {
-        let exact = documentIndex.chunks(forExactTopic: topic)
+        let exact = DocumentIndex.rawChunks(forExactTopic: topic)
         if !exact.isEmpty {
             return exact.prefix(topK).map(\.text).joined(separator: "\n\n")
         }
         print("⚠️ retrieveContext: nenhum chunk com topic exatamente '\(topic)' — caindo no hybridSearch (fuzzy).")
+        try? await documentIndex.ensureReady()
         return (try? await documentIndex.retrieveContext(for: topic, topK: topK)) ?? ""
     }
 
@@ -273,54 +328,174 @@ final class StudyGenerator {
 
     // MARK: - Exemplo de código explicado (chamada dedicada)
 
-    /// Plano V4 Fase 2 — passo a passo no mesmo padrão MLX→FM que já
-    /// existe pra quiz difícil e análise de código: o MLX rascunha código +
-    /// explicação em texto puro, e o Foundation Models só REFORMATA esse
-    /// rascunho no schema ExplainedCodeExample. Se o MLX estiver
-    /// indisponível ou qualquer etapa falhar, cai pro fluxo antigo (FM
-    /// gerando do zero) — a criação do tópico nunca trava por causa disso.
-    func generateCodeExample(topic: String, context: String, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> ExplainedCodeExample {
+    /// PLAN_06/PLAN_07 — UPGRADE do exemplo de código via MLX, rodado só em
+    /// BACKGROUND (Fase 2), nunca no caminho síncrono de abertura de tela.
+    ///
+    /// PLAN_07 preencheu o stub que o PLAN_06 deixou pronto: aqui roda o
+    /// pipeline completo da Estratégia D (SOLUTIONS_PLAN.md §5.2, passos
+    /// 4-7) — `loadModel()` → rascunho MLX (texto livre, código +
+    /// explicação) → crítica FM (`critiqueCodeDraft`) → formatação FM
+    /// (`formatCodeExample`, com retry se truncado). São exatamente os
+    /// mesmos prompts que rodavam no caminho síncrono antes do PLAN_06; o
+    /// que mudou é QUANDO eles rodam, não O QUE eles pedem. É isso que
+    /// preserva a defesa contra alucinação de API documentada em `PLAN.md`
+    /// §8.1 sem pagar o custo no relógio do usuário.
+    ///
+    /// A decisão de APLICAR o resultado (válido? diferente do FM-only?) NÃO
+    /// é tomada aqui — é do chamador, `TopicRepository.applyCodeExampleUpgrade`
+    /// (§5.2, passo 8). Esta função só produz o candidato.
+    ///
+    /// A prioridade chega sempre como `.poolFill` neste plano; a prioridade
+    /// adaptativa por checks determinísticos é o PLAN_08 (§5.2, passo 3).
+    ///
+    /// Não lança, por contrato: um upgrade de background que falha nunca
+    /// pode derrubar a tela (§16.5) — a ausência de upgrade é representada
+    /// por `nil`, e o `StudyTopic` continua com o exemplo FM-only válido da
+    /// Fase 1. Também NÃO cai pro `generateCodeExampleFM` em caso de erro
+    /// (ao contrário do legado abaixo): isso só regeraria, com gasto de
+    /// bateria e mais uma chamada FM, exatamente o que a Fase 1 já
+    /// persistiu.
+    func upgradeCodeExampleViaMLX(
+        topic: String,
+        context: String,
+        priority: GenerationOrchestrator.Priority = .poolFill
+    ) async -> ExplainedCodeExample? {
+        do {
+            // Passo 4 — dedup interno do MLXService: se a trilha B do
+            // crescimento de pool já carregou (ou está carregando) o modelo,
+            // isto NÃO dispara um segundo download/carga, só aguarda a mesma
+            // Task compartilhada.
+            try await MLXService.shared.loadModel()
+
+            // Passo 5 — rascunho MLX (mesmo prompt do caminho síncrono
+            // histórico, compartilhado com o legado dormente).
+            let draft = try await mlxCodeExampleDraft(topic: topic, context: context, priority: priority)
+            print("🔵 [upgrade do exemplo de código] rascunho MLX recebido (\(draft.count) chars) — criticando e formatando via Foundation Models.")
+
+            // Passos 6 e 7 — crítica FM + formatação FM (a crítica acontece
+            // DENTRO de formatCodeExample, que já encadeia as duas passadas).
+            //
+            // O candidato volta CRU de propósito: julgar se ele é válido e se
+            // vale substituir o que está na tela é o passo 8, no
+            // `TopicRepository`. Manter a decisão num lugar só é o que
+            // permite distinguir, na instrumentação, "o pipeline falhou" de
+            // "o pipeline produziu algo ruim" — dois problemas diferentes.
+            return try await formatCodeExample(draft: draft, topic: topic, context: context, priority: priority)
+        } catch {
+            // Falha de upgrade é um NÃO-EVENTO pro usuário: a tela segue com
+            // o conteúdo válido da Fase 1. Só loga.
+            print("⚠️ [upgrade do exemplo de código] pipeline MLX→crítica→formatação falhou para '\(topic)' (\(StudyGeneratorError.describe(error))) — mantendo o exemplo FM-only da Fase 1.")
+            return nil
+        }
+    }
+
+    /// Rascunho MLX do exemplo de código (código + passo a passo em texto
+    /// puro). Extraído do corpo de `legacyGenerateCodeExampleViaMLX` no
+    /// PLAN_07 para ser COMPARTILHADO com `upgradeCodeExampleViaMLX` — o
+    /// prompt não mudou nem uma palavra na extração, de propósito: os dois
+    /// caminhos precisam produzir o mesmo tipo de rascunho, e duplicar o
+    /// prompt seria garantir que eles divergissem com o tempo.
+    ///
+    /// Não chama `loadModel()` — quem chama decide quando pagar isso (o
+    /// upgrade paga em background; o legado pagava no caminho síncrono).
+    private func mlxCodeExampleDraft(
+        topic: String,
+        context: String,
+        priority: GenerationOrchestrator.Priority
+    ) async throws -> String {
+        // PLAN_11: o bloco de contexto vem PRIMEIRO (e de
+        // `mlxContextBlock`, compartilhado com o quiz difícil e a análise de
+        // código) para que o prefixo `system prompt + contexto RAG` seja
+        // reaproveitável entre as 3 chamadas MLX deste tópico. O texto da
+        // instrução da tarefa não mudou — só desceu para depois do contexto.
+        let mlxPrompt = """
+        \(Self.mlxContextBlock(topic: topic, context: context))
+
+        Escreva UM código Swift de 5-15 linhas, limpo e completo, que ilustre o conceito principal de '\(topic)', e explique-o passo a passo em texto puro.
+
+        IMPORTANTE: use SOMENTE APIs, tipos e modificadores que aparecem no contexto oficial acima \
+        ou que você tem certeza absoluta que existem na versão atual de Swift/SwiftUI. NÃO invente \
+        nomes de métodos, classes, structs ou modificadores. Se não tiver certeza de que algo existe, \
+        prefira uma abordagem mais simples e genérica em vez de arriscar um nome inventado.
+
+        IMPORTANTE (Plano V5): priorize demonstrar o USO PRÁTICO do conceito, exatamente como um \
+        desenvolvedor usaria no dia a dia (ex.: usar `@State`/`@Observable` numa View real) — NÃO \
+        reimplemente o mecanismo do zero (ex.: criar um property wrapper customizado do zero pra \
+        ilustrar 'Property Wrappers') a menos que o contexto oficial acima trate especificamente de \
+        criar algo customizado. Prefira sempre o exemplo mais simples e direto de uso real.
+
+        Formato exato da resposta (texto puro, sem markdown, sem JSON):
+        CODIGO:
+        <código>
+        PASSO A PASSO:
+        1. <trecho> — <explicação>
+        2. <trecho> — <explicação>
+        """
+
+        // Fila do motor MLX (paralela à do FM, nunca a mesma) — F7, o
+        // GenerationOrchestrator não é tocado por este plano.
+        return try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
+            try await MLXService.shared.generateQuestionDraft(
+                systemPrompt: MLXService.draftSystemPrompt,
+                promptContext: mlxPrompt,
+                topic: topic,
+                taskType: .codeExampleDraft,
+                cacheTopic: topic
+            )
+        }
+    }
+
+    /// PLAN_07 (§5.2, passo 8) — validade ESTRUTURAL de um exemplo candidato,
+    /// antes de ele virar um patch sobre o `StudyTopic` já persistido.
+    ///
+    /// Deliberadamente barato e puramente sintático: só barra o que é
+    /// obviamente pior que o exemplo FM-only que já está na tela (código
+    /// vazio, código truncado, walkthrough vazio ou com passos vazios). NÃO
+    /// é o gate determinístico do PLAN_08 (`DeterministicCodeChecks`,
+    /// checklist sintático de erros conhecidos decidindo PRIORIDADE) — este
+    /// aqui é só a rede que impede um resultado degenerado de substituir um
+    /// conteúdo válido.
+    ///
+    /// `static` e sem dependência de estado: é testável como função pura
+    /// (mesmo padrão de `looksTruncated`, já coberta em
+    /// `StudyGeneratorPureFunctionsTests`).
+    static func isStructurallyValidCodeExample(_ example: ExplainedCodeExample) -> Bool {
+        guard !example.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard !looksTruncated(example.code) else { return false }
+        guard !example.walkthrough.isEmpty else { return false }
+        // Um passo sem explicação não ensina nada — e o walkthrough é
+        // exatamente o que a tela renderiza ao lado do código.
+        return example.walkthrough.allSatisfy {
+            !$0.explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    /// Pipeline MLX→crítica→formatação do exemplo de código (Plano V4 Fase 2):
+    /// o MLX rascunha código + explicação em texto puro, e o Foundation Models
+    /// só REFORMATA esse rascunho no schema ExplainedCodeExample.
+    ///
+    /// PLAN_06: era `generateCodeExample`, o caminho PRINCIPAL e SÍNCRONO de
+    /// geração do exemplo — ou seja, toda abertura de tópico novo pagava
+    /// carga + geração do modelo de 7B no relógio do usuário (o gargalo #1 do
+    /// SOLUTIONS_PLAN.md, F1). Foi PRESERVADO aqui, e não deletado, por dois
+    /// motivos: (1) é a base literal do upgrade em background do PLAN_07;
+    /// (2) o rollback deste plano é voltar a chamá-lo direto da Fase 1.
+    /// Hoje não tem chamador — é código dormente, de propósito.
+    ///
+    /// PLAN_07: o corpo do rascunho MLX saiu daqui pro `mlxCodeExampleDraft`
+    /// compartilhado (mesmo prompt, mesma chamada, mesma fila) — o
+    /// comportamento desta função não mudou, incluindo o fallback pro
+    /// FM-only, que é o que a distingue do upgrade em background.
+    private func legacyGenerateCodeExampleViaMLX(topic: String, context: String, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> ExplainedCodeExample {
         do {
             try await MLXService.shared.loadModel()
 
-            let mlxPrompt = """
-            Você é um especialista em Swift. Escreva UM código Swift de 5-15 linhas, limpo e completo, que ilustre o conceito principal de '\(topic)', e explique-o passo a passo em texto puro.
-
-            [Contexto oficial]:
-            \(context.isEmpty ? "Conhecimento geral sobre Swift e Apple Frameworks." : context)
-
-            IMPORTANTE: use SOMENTE APIs, tipos e modificadores que aparecem no contexto oficial acima \
-            ou que você tem certeza absoluta que existem na versão atual de Swift/SwiftUI. NÃO invente \
-            nomes de métodos, classes, structs ou modificadores. Se não tiver certeza de que algo existe, \
-            prefira uma abordagem mais simples e genérica em vez de arriscar um nome inventado.
-
-            IMPORTANTE (Plano V5): priorize demonstrar o USO PRÁTICO do conceito, exatamente como um \
-            desenvolvedor usaria no dia a dia (ex.: usar `@State`/`@Observable` numa View real) — NÃO \
-            reimplemente o mecanismo do zero (ex.: criar um property wrapper customizado do zero pra \
-            ilustrar 'Property Wrappers') a menos que o contexto oficial acima trate especificamente de \
-            criar algo customizado. Prefira sempre o exemplo mais simples e direto de uso real.
-
-            Formato exato da resposta (texto puro, sem markdown, sem JSON):
-            CODIGO:
-            <código>
-            PASSO A PASSO:
-            1. <trecho> — <explicação>
-            2. <trecho> — <explicação>
-            """
-
-            let draft = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
-                try await MLXService.shared.generateQuestionDraft(
-                    systemPrompt: "Você é um especialista em Swift. Gere um código de exemplo curto e uma explicação passo a passo, em texto puro, usando apenas APIs reais.",
-                    promptContext: mlxPrompt,
-                    topic: topic,
-                    taskType: .codeExampleDraft
-                )
-            }
+            let draft = try await mlxCodeExampleDraft(topic: topic, context: context, priority: priority)
             print("🔵 [exemplo de código] rascunho MLX recebido (\(draft.count) chars) — formatando via Foundation Models.")
             return try await formatCodeExample(draft: draft, topic: topic, context: context, priority: priority)
         } catch {
             print("⚠️ [exemplo de código] fluxo MLX→FM falhou (\(StudyGeneratorError.describe(error))) — fallback: Foundation Models gerando do zero.")
-            return try await generateCodeExampleFromScratch(topic: topic, context: context, priority: priority)
+            return try await generateCodeExampleFM(topic: topic, context: context, priority: priority)
         }
     }
 
@@ -465,9 +640,22 @@ final class StudyGenerator {
         }
     }
 
-    /// Fluxo antigo (pré-V4): Foundation Models gera código + walkthrough do
-    /// zero, numa chamada dedicada. Mantido como FALLBACK do caminho MLX→FM.
-    private func generateCodeExampleFromScratch(topic: String, context: String, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> ExplainedCodeExample {
+    /// PLAN_06 — CAMINHO PRINCIPAL do exemplo de código: Foundation Models
+    /// gera código + walkthrough do zero, numa chamada dedicada. UMA chamada
+    /// FM, ZERO MLX, ZERO carga de modelo.
+    ///
+    /// Era `generateCodeExampleFromScratch`, tratada como fallback raro do
+    /// pipeline MLX→crítica→formatação. Foi PROMOVIDA a caminho principal e
+    /// passou a ser chamada SEMPRE (não mais condicionalmente) na Fase 1 de
+    /// `TopicRepository.generateAndPersistPhase1` — é isso que tira o modelo
+    /// de 7B do relógio do usuário (SOLUTIONS_PLAN.md §5.2, passo 1).
+    ///
+    /// A revisão técnica não desapareceu, só deixou de ser síncrona: ela
+    /// volta como upgrade em background em `upgradeCodeExampleViaMLX`
+    /// (PLAN_07). O projeto já documentou (PLAN.md §8.1) que FM sozinho
+    /// alucina API em código — por isso a crítica continua no desenho, só
+    /// que paga pelo relógio do processador, não pelo do usuário.
+    func generateCodeExampleFM(topic: String, context: String, priority: GenerationOrchestrator.Priority = .userBlocking) async throws -> ExplainedCodeExample {
         let model = try requireModel()
 
         let instructions = """
@@ -482,7 +670,7 @@ final class StudyGenerator {
         especificamente disso.
         """
 
-        return try await Self.timed("exemplo de código do zero (FM)", engine: .foundationModels, taskType: .codeExampleFormat, topic: topic, ragContextChars: context.count) {
+        return try await Self.timed("exemplo de código (FM-only, Fase 1)", engine: .foundationModels, taskType: .codeExampleFormat, topic: topic, ragContextChars: context.count) {
             try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
                 try await self.withDiagnostics(step: "exemplo de código", context: context) { ctx in
                     let session = LanguageModelSession(model: model, instructions: instructions)
@@ -576,9 +764,13 @@ final class StudyGenerator {
             // quanto contexto cada chamada usa).
             let ragContext = await retrieveContext(for: topic, topK: 3)
 
+            // PLAN_11: contexto primeiro, via `mlxContextBlock` (mesmo bloco
+            // do exemplo de código e da análise), depois a instrução da
+            // tarefa — ver a documentação de `mlxContextBlock`.
             let mlxPrompt = """
-            Você é um especialista em Swift. Crie \(count) perguntas técnicas de nível avançado sobre '\(topic)', distintas entre si.
-            Contexto oficial: \(ragContext)
+            \(Self.mlxContextBlock(topic: topic, context: ragContext))
+
+            Crie \(count) perguntas técnicas de nível avançado sobre '\(topic)', distintas entre si.
 
             Formato de CADA pergunta (texto puro, sem markdown), separadas pela linha \(MLXService.itemSeparator):
             PERGUNTA: <a pergunta>
@@ -590,29 +782,32 @@ final class StudyGenerator {
             // própria do motor MLX (paralela à do FM, nunca a mesma fila).
             let drafts = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
                 try await MLXService.shared.generateQuestionDrafts(
-                    systemPrompt: "Você é um especialista em Swift. Gere perguntas técnicas difíceis sobre conceitos da linguagem, em texto puro.",
+                    systemPrompt: MLXService.draftSystemPrompt,
                     promptContext: mlxPrompt,
                     count: count,
                     topic: topic,
-                    taskType: .hardQuizDraft
+                    taskType: .hardQuizDraft,
+                    cacheTopic: topic
                 )
             }
 
-            var results: [QuizQuestion] = []
-            for draft in drafts.prefix(count) {
-                let question = await formatHardQuestion(draft: draft, topic: topic, difficulty: difficulty, priority: priority)
-                results.append(question)
-            }
+            // PLAN_09: formatação em LOTE — uma única chamada FM formata até
+            // N rascunhos de uma vez (reaproveitando QuizQuestionBatch, já
+            // usado com sucesso pelo quiz fácil/médio), em vez de N chamadas
+            // individuais. `formatHardQuestion` continua existindo e é usada
+            // como fallback item a item se o lote falhar ou vier truncado.
+            var results = await formatHardQuestionsBatch(drafts: Array(drafts.prefix(count)), topic: topic, difficulty: difficulty, priority: priority)
 
             // Se o lote veio com menos itens que o pedido (split falhou ou o
             // modelo gerou menos), completa um a um — nunca devolve menos.
             while results.count < count {
                 let single = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
                     try await MLXService.shared.generateQuestionDraft(
-                        systemPrompt: "Você é um especialista em Swift. Gere uma pergunta técnica difícil sobre um conceito da linguagem, em texto puro.",
+                        systemPrompt: MLXService.draftSystemPrompt,
                         promptContext: mlxPrompt.replacingOccurrences(of: "Crie \(count) perguntas técnicas", with: "Crie UMA pergunta técnica"),
                         topic: topic,
-                        taskType: .hardQuizDraft
+                        taskType: .hardQuizDraft,
+                        cacheTopic: topic
                     )
                 }
                 let question = await formatHardQuestion(draft: single, topic: topic, difficulty: difficulty, priority: priority)
@@ -694,12 +889,127 @@ final class StudyGenerator {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// PLAN_09 (§6.2.1) — formata um LOTE de rascunhos MLX (≤4) em
+    /// QuizQuestion numa ÚNICA chamada ao Foundation Models, reaproveitando
+    /// o schema `QuizQuestionBatch` (já usado com sucesso pelo quiz
+    /// fácil/médio) em vez do schema `QuizQuestion` avulso. Substitui N
+    /// chamadas individuais por 1 — o maior contribuinte de chamadas FM de
+    /// background por tópico novo (SOLUTIONS_PLAN.md §6.1).
+    ///
+    /// Fallback gracioso de 2 níveis, por design (SOLUTIONS_PLAN.md §27):
+    /// (1) se o lote inteiro falhar ou devolver uma contagem diferente da
+    /// esperada — não dá pra confiar no pareamento rascunho↔pergunta nesse
+    /// caso — cai para `formatHardQuestion` item a item; (2) se só um item
+    /// específico do lote vier truncado, só ESSE item é reformatado
+    /// individualmente, sem descartar o lote inteiro.
+    ///
+    /// `formatHardQuestion` (individual) NÃO foi removida — continua no
+    /// código como base dos dois níveis de fallback acima.
+    private func formatHardQuestionsBatch(drafts: [String], topic: String, difficulty: Difficulty, priority: GenerationOrchestrator.Priority) async -> [QuizQuestion] {
+        let cleanDrafts = drafts.map(Self.sanitizeDraft).filter { !$0.isEmpty }
+        guard !cleanDrafts.isEmpty else { return [] }
+
+        // Curto-circuito pra 1 rascunho só: NÃO vale pagar o overhead do
+        // schema em array (QuizQuestionBatch) pra formatar um item único —
+        // isso é comum na prática quando o split do MLX (itemSeparator)
+        // devolve menos rascunhos que o pedido. `formatHardQuestion` usa o
+        // schema QuizQuestion avulso, mais leve e já testado pra 1 item —
+        // mesmo padrão de curto-circuito de `critiqueCodeDraftsBatch`.
+        guard cleanDrafts.count > 1 else {
+            return [await formatHardQuestion(draft: cleanDrafts[0], topic: topic, difficulty: difficulty, priority: priority)]
+        }
+
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else {
+            print("⚠️ [lote de perguntas difíceis] Foundation Models indisponível — formatando individualmente.")
+            var results: [QuizQuestion] = []
+            for draft in cleanDrafts {
+                results.append(await formatHardQuestion(draft: draft, topic: topic, difficulty: difficulty, priority: priority))
+            }
+            return results
+        }
+
+        let instructions = """
+        Você recebe um LOTE de rascunhos de perguntas técnicas de Swift, cada um já com a resposta correta
+        indicada, separados pela linha \(MLXService.itemSeparator).
+        Sua tarefa é reformatar CADA rascunho, na MESMA ORDEM, em uma pergunta de múltipla escolha com
+        exatamente 4 alternativas plausíveis, sendo apenas uma correta — baseada fielmente no rascunho
+        correspondente, sem inventar informação nova.
+        As alternativas NUNCA devem ter prefixo de letra ou número (nunca "A)", "B.", "1)" etc., mesmo que o
+        rascunho tenha algo parecido) — escreva só o texto puro de cada alternativa.
+        Devolva EXATAMENTE \(cleanDrafts.count) perguntas, uma para cada rascunho, na mesma ordem.
+        Responda sempre em português.
+        """
+
+        let joinedDrafts = cleanDrafts.enumerated()
+            .map { "Rascunho \($0.offset + 1):\n\($0.element)" }
+            .joined(separator: "\n\(MLXService.itemSeparator)\n")
+
+        let prompt = """
+        Rascunhos gerados por outro modelo (\(cleanDrafts.count) itens, separados por \(MLXService.itemSeparator)):
+        \(joinedDrafts)
+
+        Reformate CADA rascunho acima em uma pergunta de múltipla escolha de dificuldade \(difficulty.rawValue),
+        na mesma ordem, com 4 alternativas plausíveis (não óbvias) cada e a alternativa correta identificada.
+        """
+
+        // Mesma fórmula já usada e testada para lotes de QuizQuestion
+        // (generateQuizBatch fácil/médio) — 220 tokens/pergunta + 150 de folga.
+        let options = GenerationOptions(maximumResponseTokens: 220 * cleanDrafts.count + 150)
+
+        for attempt in 1...2 {
+            do {
+                let formatted = try await Self.timed("formatação de lote de perguntas difíceis (FM)", engine: .foundationModels, taskType: .hardQuizFormat, topic: topic, batchSize: cleanDrafts.count) {
+                    try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                        let session = LanguageModelSession(model: model, instructions: instructions)
+                        return try await session.respond(to: prompt, generating: QuizQuestionBatch.self, options: options)
+                    }
+                }
+                var questions = formatted.content.questions
+
+                // Contagem diferente do esperado: não dá pra confiar no
+                // pareamento rascunho↔pergunta — trata como falha de lote e
+                // cai pro caminho individual (mais confiável nesse caso).
+                guard questions.count == cleanDrafts.count else {
+                    print("⚠️ [lote de perguntas difíceis] contagem devolvida (\(questions.count)) != rascunhos (\(cleanDrafts.count)) — formatando individualmente.")
+                    break
+                }
+
+                // Retry POR ITEM se algum vier truncado — nunca descarta o
+                // lote inteiro por causa de 1 item (SOLUTIONS_PLAN.md §6.2.1).
+                for index in questions.indices where Self.looksTruncated(questions[index].question) {
+                    print("⚠️ [lote de perguntas difíceis] item \(index) parece truncado — retry individual.")
+                    questions[index] = await formatHardQuestion(draft: cleanDrafts[index], topic: topic, difficulty: difficulty, priority: priority)
+                }
+                return questions
+            } catch {
+                print("⚠️ [lote de perguntas difíceis] formatação em lote falhou (tentativa \(attempt)/2): \(StudyGeneratorError.describe(error))")
+                if attempt < 2 { try? await Task.sleep(for: .seconds(1)) }
+            }
+        }
+
+        // Fallback gracioso (SOLUTIONS_PLAN.md §27): o lote falhou de forma
+        // sistemática — cai pra formatação individual, item a item. Mais
+        // chamadas que o caminho feliz, mas mais barato que reverter o PR
+        // inteiro, e nunca falha o tópico inteiro por causa disso.
+        print("⚠️ [lote de perguntas difíceis] lote falhou — caindo para formatação individual (fallback gracioso).")
+        var results: [QuizQuestion] = []
+        for draft in cleanDrafts {
+            results.append(await formatHardQuestion(draft: draft, topic: topic, difficulty: difficulty, priority: priority))
+        }
+        return results
+    }
+
     /// Formata UM rascunho do MLX numa QuizQuestion via Foundation Models.
     /// Nunca lança: se a formatação falhar, devolve o fallback genérico.
     ///
     /// Plano V5, PLAN_02: adicionado orçamento de token explícito (370 tokens,
     /// fórmula 220*1+150) e detecção de truncamento + retry-curto, trazendo
     /// paridade com formatCodeAnalysisQuestion que já tinha esse padrão correto.
+    ///
+    /// PLAN_09: continua existindo (não deletada) como base dos dois níveis
+    /// de fallback de `formatHardQuestionsBatch` — retry por item truncado e
+    /// degradação graciosa se o lote inteiro falhar.
     private func formatHardQuestion(draft: String, topic: String, difficulty: Difficulty, priority: GenerationOrchestrator.Priority) async -> QuizQuestion {
         let cleanDraft = Self.sanitizeDraft(draft)
 
@@ -793,14 +1103,17 @@ final class StudyGenerator {
         // Plano V5: topK 3 — ver comentário equivalente em generateQuizBatch.
         let ragContext = await retrieveContext(for: topic, topK: 3)
 
+        // PLAN_11: contexto primeiro, via `mlxContextBlock` — o cabeçalho
+        // `[Contexto RAG]` que existia aqui foi substituído pelo bloco
+        // compartilhado, senão o prefixo comum com as outras 2 chamadas
+        // deste tópico morreria justamente no cabeçalho.
         let mlxPrompt = """
-        Você é um especialista em Swift. Escreva \(count) trechos de código Swift limpos, de 6 a 10 linhas cada, sobre '\(topic)', e explique o comportamento de cada um. Os trechos devem ser distintos entre si.
+        \(Self.mlxContextBlock(topic: topic, context: ragContext))
+
+        Escreva \(count) trechos de código Swift limpos, de 6 a 10 linhas cada, sobre '\(topic)', e explique o comportamento de cada um. Os trechos devem ser distintos entre si.
 
         IMPORTANTE: priorize trechos que mostrem o USO PRÁTICO do conceito (como um desenvolvedor
         realmente usaria), não a reimplementação do mecanismo por baixo dos panos.
-
-        [Contexto RAG]:
-        \(ragContext.isEmpty ? "Conhecimento geral sobre Swift e Apple Frameworks." : ragContext)
 
         Formato de CADA item (texto puro, sem markdown, sem JSON), separados pela linha \(MLXService.itemSeparator):
         CODIGO:
@@ -812,26 +1125,32 @@ final class StudyGenerator {
         do {
             let drafts = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
                 try await MLXService.shared.generateQuestionDrafts(
-                    systemPrompt: "Você é um especialista em Swift. Gere trechos de código e perguntas de análise sobre seus comportamentos, em texto puro.",
+                    systemPrompt: MLXService.draftSystemPrompt,
                     promptContext: mlxPrompt,
                     count: count,
                     topic: topic,
-                    taskType: .codeAnalysisDraft
+                    taskType: .codeAnalysisDraft,
+                    cacheTopic: topic
                 )
             }
 
-            var results: [CodeAnalysisQuestion] = []
-            for draft in drafts.prefix(count) {
-                results.append(await formatCodeAnalysisQuestion(draft: draft, topic: topic, context: ragContext, priority: priority))
-            }
+            // PLAN_09: crítica + formatação em LOTE — 2 chamadas FM (1 crítica
+            // em lote + 1 formatação em lote) formatam até N rascunhos, em vez
+            // de N pares de chamadas (crítica + formatação por item).
+            // `formatCodeAnalysisQuestion` continua existindo, usada como
+            // fallback item a item pelas duas funções de lote abaixo.
+            let batchDrafts = Array(drafts.prefix(count))
+            let critiques = await critiqueCodeDraftsBatch(drafts: batchDrafts, topic: topic, context: ragContext, priority: priority, taskType: .codeAnalysisCritique)
+            var results = await formatCodeAnalysisBatch(drafts: batchDrafts, critiques: critiques, topic: topic, context: ragContext, priority: priority)
 
             while results.count < count {
                 let single = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
                     try await MLXService.shared.generateQuestionDraft(
-                        systemPrompt: "Você é um especialista em Swift. Gere um trecho de código e uma pergunta de análise sobre seu comportamento, em texto puro.",
+                        systemPrompt: MLXService.draftSystemPrompt,
                         promptContext: mlxPrompt.replacingOccurrences(of: "Escreva \(count) trechos de código Swift limpos", with: "Escreva UM trecho de código Swift limpo"),
                         topic: topic,
-                        taskType: .codeAnalysisDraft
+                        taskType: .codeAnalysisDraft,
+                        cacheTopic: topic
                     )
                 }
                 results.append(await formatCodeAnalysisQuestion(draft: single, topic: topic, context: ragContext, priority: priority))
@@ -840,6 +1159,218 @@ final class StudyGenerator {
         } catch {
             throw StudyGeneratorError.generationFailed(step: "análise de código (MLX)", underlying: error)
         }
+    }
+
+    /// PLAN_09 (§6.2.2) — critica um LOTE de rascunhos de código numa ÚNICA
+    /// chamada FM, em vez de uma chamada de crítica por rascunho.
+    ///
+    /// Diferente de `formatHardQuestionsBatch`/`formatCodeAnalysisBatch`, NÃO
+    /// usa um schema `@Generable` novo: pede texto livre com as críticas
+    /// separadas por `MLXService.itemSeparator`, na mesma ordem dos
+    /// rascunhos — o mesmo padrão de parsing já usado em
+    /// `MLXService.generateQuestionDrafts`. Um schema estruturado
+    /// (`CritiqueBatch`) só seria criado se esta abordagem se mostrasse
+    /// frágil em teste real (SOLUTIONS_PLAN.md §6.2.2) — não foi o caso, e
+    /// não foi implementado preventivamente.
+    ///
+    /// Fallback gracioso: se o split não devolver exatamente `drafts.count`
+    /// itens (parsing falhou) ou a chamada em lote lançar, cai para
+    /// `critiqueCodeDraft` item a item.
+    private func critiqueCodeDraftsBatch(drafts: [String], topic: String, context: String, priority: GenerationOrchestrator.Priority, taskType: GenerationMetrics.TaskType) async -> [String] {
+        guard !drafts.isEmpty else { return [] }
+        guard drafts.count > 1 else {
+            return [(try? await critiqueCodeDraft(draft: drafts[0], topic: topic, context: context, priority: priority, taskType: taskType)) ?? "OK - sem erros"]
+        }
+
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else {
+            var results: [String] = []
+            for draft in drafts {
+                results.append((try? await critiqueCodeDraft(draft: draft, topic: topic, context: context, priority: priority, taskType: taskType)) ?? "OK - sem erros")
+            }
+            return results
+        }
+
+        let instructions = """
+        Você é um revisor de código Swift rigoroso. Você recebe um LOTE de rascunhos de código Swift,
+        separados pela linha \(MLXService.itemSeparator). Sua ÚNICA tarefa é apontar erros técnicos REAIS em
+        CADA rascunho — não reescreva o código, só liste os problemas de cada um.
+        Procure especificamente por: APIs que não existem, uso incorreto de uma API real (ex.: passar um
+        valor onde a API espera um TIPO, como em navigationDestination(for:), que exige Tipo.self e não
+        um valor literal; ou um parâmetro de inicializador que o tipo não declara), métodos/modificadores
+        deprecados, e qualquer contradição com o contexto de documentação oficial fornecido.
+
+        \(Self.commonCodeMistakesChecklist)
+
+        Se não encontrar nenhum erro real num rascunho, responda exatamente "OK - sem erros" pra ele.
+        Seja específico (cite o trecho exato) e conciso — no máximo 5 pontos por rascunho.
+        Responda sempre em português.
+
+        IMPORTANTE: devolva EXATAMENTE \(drafts.count) críticas, na MESMA ORDEM dos rascunhos, cada uma
+        separada pela linha \(MLXService.itemSeparator) — nunca junte duas críticas no mesmo bloco.
+        """
+
+        let joinedDrafts = drafts.enumerated()
+            .map { "Rascunho \($0.offset + 1):\n\($0.element)" }
+            .joined(separator: "\n\(MLXService.itemSeparator)\n")
+
+        let prompt = """
+        Contexto da documentação oficial:
+        \(context.isEmpty ? "Conhecimento geral de Swift, com cautela." : context)
+
+        Rascunhos de código Swift sobre '\(topic)' (\(drafts.count) itens, separados por \(MLXService.itemSeparator)):
+        \(joinedDrafts)
+
+        Liste os erros técnicos reais de CADA rascunho acima (ou "OK - sem erros" pra ele), na mesma ordem,
+        separando cada crítica pela linha \(MLXService.itemSeparator).
+        """
+
+        // Linear, ponto de partida a calibrar por medição (SOLUTIONS_PLAN.md §6.2.2).
+        let options = GenerationOptions(maximumResponseTokens: 350 * drafts.count)
+
+        do {
+            let response = try await Self.timed("crítica em lote de análise de código (FM)", engine: .foundationModels, taskType: taskType, topic: topic, ragContextChars: context.count, batchSize: drafts.count) {
+                try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                    let session = LanguageModelSession(model: model, instructions: instructions)
+                    return try await session.respond(to: prompt, options: options)
+                }
+            }
+            let items = response.content
+                .components(separatedBy: MLXService.itemSeparator)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            if items.count == drafts.count {
+                return items
+            }
+            print("⚠️ [crítica em lote de análise de código] contagem devolvida (\(items.count)) != rascunhos (\(drafts.count)) — críticas individuais.")
+        } catch {
+            print("⚠️ [crítica em lote de análise de código] falhou (\(StudyGeneratorError.describe(error))) — críticas individuais.")
+        }
+
+        var results: [String] = []
+        for draft in drafts {
+            results.append((try? await critiqueCodeDraft(draft: draft, topic: topic, context: context, priority: priority, taskType: taskType)) ?? "OK - sem erros")
+        }
+        return results
+    }
+
+    /// PLAN_09 (§6.2.2) — formata um LOTE de rascunhos de análise de código
+    /// (≤4), já com suas críticas pré-computadas (`critiqueCodeDraftsBatch`),
+    /// numa ÚNICA chamada ao Foundation Models — reaproveita o schema
+    /// `CodeAnalysisBatch` (já existia em `StudyModels.swift`, nunca usado
+    /// antes deste plano).
+    ///
+    /// Mesmo desenho de fallback em 2 níveis de `formatHardQuestionsBatch`:
+    /// contagem incorreta ou erro na chamada → cai pra `formatCodeAnalysisQuestion`
+    /// item a item (que recalcula a própria crítica); `codeSnippet` truncado
+    /// num item específico → só ESSE item é refeito individualmente, sem
+    /// descartar o lote inteiro. O risco de truncamento aqui é maior que no
+    /// quiz difícil por causa do `codeSnippet` competindo por orçamento
+    /// dentro do mesmo item (SOLUTIONS_PLAN.md §6.2.2).
+    private func formatCodeAnalysisBatch(drafts: [String], critiques: [String], topic: String, context: String, priority: GenerationOrchestrator.Priority) async -> [CodeAnalysisQuestion] {
+        let cleanDrafts = drafts.map(Self.sanitizeDraft)
+        guard !cleanDrafts.isEmpty else { return [] }
+
+        // Curto-circuito pra 1 rascunho só (mesmo raciocínio de
+        // `formatHardQuestionsBatch`): não vale pagar o overhead do schema em
+        // array (CodeAnalysisBatch) pra formatar um item único — comum
+        // quando o split do MLX devolve menos rascunhos que o pedido.
+        // `formatCodeAnalysisQuestion` recalcula sua própria crítica, mas
+        // isso é aceitável só no caso raro de 1 item.
+        guard drafts.count > 1 else {
+            return [await formatCodeAnalysisQuestion(draft: drafts[0], topic: topic, context: context, priority: priority)]
+        }
+
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else {
+            var results: [CodeAnalysisQuestion] = []
+            for draft in drafts {
+                results.append(await formatCodeAnalysisQuestion(draft: draft, topic: topic, context: context, priority: priority))
+            }
+            return results
+        }
+
+        let instructions = """
+        Você recebe um LOTE de rascunhos, cada um com um trecho de código Swift e a explicação do
+        comportamento esperado dele, além de uma REVISÃO TÉCNICA feita por um segundo revisor — separados
+        pela linha \(MLXService.itemSeparator), na mesma ordem.
+        Sua tarefa é reformatar CADA rascunho, na MESMA ORDEM, numa pergunta de análise de código com
+        exatamente 5 alternativas plausíveis, sendo apenas uma correta.
+        Se a revisão técnica de um rascunho apontou um erro real no código (API que não existe, sintaxe
+        inválida, algo que não compila sem intenção pedagógica), CORRIJA o código no campo codeSnippet
+        daquele item antes de formatar — não preserve um erro real só por fidelidade ao rascunho. Se a
+        revisão disse que não há erros, preserve o código como está, sem a marcação 'CODIGO:'.
+        A alternativa correta e as explicações têm que corresponder exatamente ao comportamento real do
+        código já corrigido, não ao rascunho original.
+        As alternativas NUNCA devem ter prefixo de letra ou número (nunca "A)", "B.", "1)" etc.) — escreva
+        só o texto puro de cada alternativa.
+        Devolva EXATAMENTE \(cleanDrafts.count) perguntas, uma para cada rascunho, na mesma ordem.
+
+        \(Self.commonCodeMistakesChecklist)
+
+        Responda sempre em português.
+        """
+
+        let joinedItems = cleanDrafts.enumerated().map { index, draft -> String in
+            let critique = index < critiques.count ? critiques[index] : "OK - sem erros"
+            return "Rascunho \(index + 1):\n\(draft)\nRevisão técnica \(index + 1):\n\(critique)"
+        }.joined(separator: "\n\(MLXService.itemSeparator)\n")
+
+        let prompt = """
+        Contexto da documentação oficial:
+        \(context.isEmpty ? "Conhecimento geral de Swift, com cautela." : context)
+
+        Rascunhos sobre '\(topic)' (\(cleanDrafts.count) itens, com suas revisões técnicas, separados por
+        \(MLXService.itemSeparator)):
+        \(joinedItems)
+
+        Reformate CADA rascunho acima numa pergunta de análise de código sobre '\(topic)', na mesma ordem,
+        com 5 alternativas plausíveis (não óbvias) cada e a alternativa correta identificada, aplicando as
+        correções de cada revisão técnica.
+        """
+
+        // Ponto de partida a calibrar por medição (SOLUTIONS_PLAN.md §6.2.2) —
+        // risco de truncamento maior aqui por causa do codeSnippet em cada item.
+        let options = GenerationOptions(maximumResponseTokens: 850 * cleanDrafts.count + 100)
+
+        for attempt in 1...2 {
+            do {
+                let formatted = try await Self.timed("formatação de lote de análise de código (FM)", engine: .foundationModels, taskType: .codeAnalysisFormat, topic: topic, ragContextChars: context.count, batchSize: cleanDrafts.count) {
+                    try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                        let session = LanguageModelSession(model: model, instructions: instructions)
+                        return try await session.respond(to: prompt, generating: CodeAnalysisBatch.self, options: options)
+                    }
+                }
+                var questions = formatted.content.questions
+
+                guard questions.count == cleanDrafts.count else {
+                    print("⚠️ [lote de análise de código] contagem devolvida (\(questions.count)) != rascunhos (\(cleanDrafts.count)) — formatando individualmente.")
+                    break
+                }
+
+                // Retry POR ITEM se algum codeSnippet vier truncado — nunca
+                // descarta o lote inteiro por causa de 1 item.
+                for index in questions.indices where Self.looksTruncated(questions[index].codeSnippet) {
+                    print("⚠️ [lote de análise de código] item \(index) parece truncado — retry individual.")
+                    questions[index] = await formatCodeAnalysisQuestion(draft: drafts[index], topic: topic, context: context, priority: priority)
+                }
+                return questions
+            } catch {
+                print("⚠️ [lote de análise de código] formatação em lote falhou (tentativa \(attempt)/2): \(StudyGeneratorError.describe(error))")
+                if attempt < 2 { try? await Task.sleep(for: .seconds(1)) }
+            }
+        }
+
+        // Fallback gracioso (SOLUTIONS_PLAN.md §27): cai pra formatação
+        // individual, item a item — recalcula a própria crítica por item,
+        // mas nunca falha o tópico inteiro por causa de um lote ruim.
+        print("⚠️ [lote de análise de código] lote falhou — caindo para formatação individual (fallback gracioso).")
+        var results: [CodeAnalysisQuestion] = []
+        for draft in drafts {
+            results.append(await formatCodeAnalysisQuestion(draft: draft, topic: topic, context: context, priority: priority))
+        }
+        return results
     }
 
     /// Formata UM rascunho de análise de código do MLX via Foundation Models.
@@ -851,6 +1382,10 @@ final class StudyGenerator {
     /// diferente, e evidenciado em teste real por uma sessão de análise de
     /// código com 1/6 de acerto. Agora passa pela mesma crítica de 2
     /// passadas (`critiqueCodeDraft`, reaproveitado) antes de formatar.
+    ///
+    /// PLAN_09: continua existindo (não deletada) como base do fallback de
+    /// `critiqueCodeDraftsBatch`/`formatCodeAnalysisBatch` — retry por item
+    /// truncado e degradação graciosa se o lote inteiro falhar.
     private func formatCodeAnalysisQuestion(draft: String, topic: String, context: String, priority: GenerationOrchestrator.Priority) async -> CodeAnalysisQuestion {
         let cleanDraft = Self.sanitizeDraft(draft)
 
