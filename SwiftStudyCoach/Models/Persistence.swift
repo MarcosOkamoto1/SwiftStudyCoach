@@ -36,7 +36,12 @@ enum DatasetVersion {
     // corrigido no exemplo de código E na análise de código, quebra de
     // linha garantida no codeSnippet/code, e exemplos priorizando uso
     // prático em vez de reimplementar o mecanismo do zero.
-    static var current = "apple-docs-v7"
+    // v8 (Plano V6): reset do cache de conteúdo gerado após a troca do
+    // modelo MLX (Qwen3-Coder-30B → Qwen2.5-Coder-7B) e a reestruturação da
+    // geração (tela liberada cedo + trilhas FM/MLX em paralelo + difícil/
+    // análise em background) — invalida tópicos gerados pelo pipeline
+    // antigo pra tudo nascer já no fluxo novo. Não toca no modelo baixado.
+    static var current = "apple-docs-v8"
 }
 
 @Model

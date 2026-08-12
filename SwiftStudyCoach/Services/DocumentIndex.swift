@@ -72,6 +72,8 @@ final class DocumentIndex {
         isIndexing = true
         defer { isIndexing = false }
 
+        let buildStart = Date()
+
         let service = try await EmbeddingService(specific: .script(.latin))
         self.service = service
 
@@ -83,6 +85,7 @@ final class DocumentIndex {
             print("🟢 DocumentIndex: cache de embeddings HIT (\(cached.chunks.count) chunks) — nada a reindexar.")
             self.chunks = cached.chunks
             self.isReady = true
+            Self.recordIndexMetric(cacheState: .hit, chunkCount: cached.chunks.count, startedAt: buildStart)
             return
         }
 
@@ -100,6 +103,27 @@ final class DocumentIndex {
         self.chunks = indexed
         self.isReady = true
         Self.saveCache(CachedIndex(datasetHash: datasetHash, chunks: indexed))
+        Self.recordIndexMetric(cacheState: .miss, chunkCount: indexed.count, startedAt: buildStart)
+    }
+
+    /// PLAN_00 §10.2: `buildIndex` já logava cache hit/miss em texto — isso
+    /// vira também um `GenerationMetrics` (taskType `.embeddingIndex`), sem
+    /// mudar o comportamento de indexação em si.
+    private static func recordIndexMetric(cacheState: GenerationMetrics.CacheState, chunkCount: Int, startedAt: Date) {
+        let elapsedMs = Date().timeIntervalSince(startedAt) * 1000
+        Task {
+            await GenerationMetricsStore.shared.record(
+                GenerationMetrics(
+                    engine: .foundationModels,
+                    taskType: .embeddingIndex,
+                    topic: "",
+                    modelID: "system",
+                    totalTimeMs: elapsedMs,
+                    ragChunkCount: chunkCount,
+                    promptCacheState: cacheState
+                )
+            )
+        }
     }
 
     // MARK: - Busca
@@ -252,7 +276,7 @@ final class DocumentIndex {
         "toda", "todos", "todas", "mesmo", "mesma",
     ]
 
-    private static func tokens(of text: String) -> Set<String> {
+    static func tokens(of text: String) -> Set<String> {
         Set(
             text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 .components(separatedBy: CharacterSet.alphanumerics.inverted)
@@ -261,7 +285,7 @@ final class DocumentIndex {
     }
 
     /// Fração dos termos da query presentes no texto do chunk (0...1).
-    private static func lexicalOverlap(queryTokens: Set<String>, text: String) -> Double {
+    static func lexicalOverlap(queryTokens: Set<String>, text: String) -> Double {
         guard !queryTokens.isEmpty else { return 0 }
         let textTokens = tokens(of: text)
         let hits = queryTokens.intersection(textTokens).count

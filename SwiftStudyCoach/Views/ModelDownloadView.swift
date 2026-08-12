@@ -5,7 +5,7 @@
 //  Tela de progresso do download do modelo MLX (primeira execução):
 //  barra de progresso real, MB baixados, velocidade e tempo restante
 //  estimado — em vez do spinner genérico que parecia travado durante
-//  um download de ~17,2 GB (Qwen3-Coder-30B-A3B-Instruct-4bit).
+//  um download longo (~4,3 GB — Qwen2.5-Coder-7B-Instruct-4bit).
 //
 //  Observa MLXService.shared (@Observable) diretamente; qualquer mudança
 //  em loadState/velocidade/ETA re-renderiza sozinha.

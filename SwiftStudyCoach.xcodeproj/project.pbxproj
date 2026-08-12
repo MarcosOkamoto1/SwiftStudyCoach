@@ -16,10 +16,22 @@
 		B62EC7D4302293400060CC0C /* NaturalLanguageEmbeddings in Frameworks */ = {isa = PBXBuildFile; productRef = B62EC7D3302293400060CC0C /* NaturalLanguageEmbeddings */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		B64BA57A302C382800A246B3 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B62EC7B130228F900060CC0C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B62EC7B830228F900060CC0C;
+			remoteInfo = SwiftStudyCoach;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		B62EC7B930228F900060CC0C /* SwiftStudyCoach.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SwiftStudyCoach.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B64BA576302C382800A246B3 /* SwiftStudyCoach Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "SwiftStudyCoach Tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B67FC13F3025054800665D84 /* SwiftStudyCoach.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = SwiftStudyCoach.xcodeproj; sourceTree = "<group>"; };
-/* End PBXFileReference section */
+		602802716F7D46CE945F15B4 /* SwiftStudyCoachTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SwiftStudyCoachTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+	/* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		B62EC7BB30228F900060CC0C /* SwiftStudyCoach */ = {
@@ -27,7 +39,17 @@
 			path = SwiftStudyCoach;
 			sourceTree = "<group>";
 		};
-/* End PBXFileSystemSynchronizedRootGroup section */
+		B64BA577302C382800A246B3 /* SwiftStudyCoach Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "SwiftStudyCoach Tests";
+			sourceTree = "<group>";
+		};
+		SwiftStudyCoachTests /* SwiftStudyCoachTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SwiftStudyCoachTests;
+			sourceTree = "<group>";
+		};
+	/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		B62EC7B630228F900060CC0C /* Frameworks */ = {
@@ -44,7 +66,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-/* End PBXFrameworksBuildPhase section */
+		B64BA573302C382800A246B3 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DC754D3DE7774ECFAC6BC235 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+	/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		2E4EBBCB3025152A00C3543F /* Frameworks */ = {
@@ -58,6 +94,7 @@
 			isa = PBXGroup;
 			children = (
 				B62EC7BB30228F900060CC0C /* SwiftStudyCoach */,
+				B64BA577302C382800A246B3 /* SwiftStudyCoach Tests */,
 				2E4EBBCB3025152A00C3543F /* Frameworks */,
 				B62EC7BA30228F900060CC0C /* Products */,
 			);
@@ -67,6 +104,7 @@
 			isa = PBXGroup;
 			children = (
 				B62EC7B930228F900060CC0C /* SwiftStudyCoach.app */,
+				602802716F7D46CE945F15B4 /* SwiftStudyCoachTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -110,7 +148,51 @@
 			productReference = B62EC7B930228F900060CC0C /* SwiftStudyCoach.app */;
 			productType = "com.apple.product-type.application";
 		};
-/* End PBXNativeTarget section */
+		B64BA575302C382800A246B3 /* SwiftStudyCoach Tests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B64BA57E302C382800A246B3 /* Build configuration list for PBXNativeTarget "SwiftStudyCoach Tests" */;
+			buildPhases = (
+				B64BA572302C382800A246B3 /* Sources */,
+				B64BA573302C382800A246B3 /* Frameworks */,
+				B64BA574302C382800A246B3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B64BA57B302C382800A246B3 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B64BA577302C382800A246B3 /* SwiftStudyCoach Tests */,
+			);
+			name = "SwiftStudyCoach Tests";
+			packageProductDependencies = (
+			);
+			productName = "SwiftStudyCoach Tests";
+			productReference = B64BA576302C382800A246B3 /* SwiftStudyCoach Tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		913A5E1EFCBF464C95314F1E /* SwiftStudyCoachTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EB77B941C7DD404C9DECFB00 /* Build configuration list for PBXNativeTarget "SwiftStudyCoachTests" */;
+			buildPhases = (
+				9561A81681DE4B59B109D230 /* Sources */,
+				DC754D3DE7774ECFAC6BC235 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				SwiftStudyCoachTests /* SwiftStudyCoachTests */,
+			);
+			name = SwiftStudyCoachTests;
+			packageProductDependencies = (
+			);
+			productName = SwiftStudyCoachTests;
+			productReference = 602802716F7D46CE945F15B4 /* SwiftStudyCoachTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+	/* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
 		B62EC7B130228F900060CC0C /* Project object */ = {
@@ -122,6 +204,10 @@
 				TargetAttributes = {
 					B62EC7B830228F900060CC0C = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					B64BA575302C382800A246B3 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = B62EC7B830228F900060CC0C;
 					};
 				};
 			};
@@ -149,13 +235,21 @@
 			);
 			projectRoot = "";
 			targets = (
-				B62EC7B830228F900060CC0C /* SwiftStudyCoach */,
-			);
+			B62EC7B830228F900060CC0C /* SwiftStudyCoach */,
+			913A5E1EFCBF464C95314F1E /* SwiftStudyCoachTests */,
+		);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		B62EC7B730228F900060CC0C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B64BA574302C382800A246B3 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -172,7 +266,29 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-/* End PBXSourcesBuildPhase section */
+		B64BA572302C382800A246B3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9561A81681DE4B59B109D230 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+	/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B64BA57B302C382800A246B3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B62EC7B830228F900060CC0C /* SwiftStudyCoach */;
+			targetProxy = B64BA57A302C382800A246B3 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		B62EC7C230228F900060CC0C /* Debug */ = {
@@ -379,6 +495,46 @@
 			};
 			name = Release;
 		};
+		B64BA57C302C382800A246B3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = CG2X3DK9Y3;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "MarcosOkamoto.SwiftStudyCoach-Tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SwiftStudyCoach.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/SwiftStudyCoach";
+			};
+			name = Debug;
+		};
+		B64BA57D302C382800A246B3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = CG2X3DK9Y3;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "MarcosOkamoto.SwiftStudyCoach-Tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SwiftStudyCoach.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/SwiftStudyCoach";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -396,6 +552,15 @@
 			buildConfigurations = (
 				B62EC7C530228F900060CC0C /* Debug */,
 				B62EC7C630228F900060CC0C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B64BA57E302C382800A246B3 /* Build configuration list for PBXNativeTarget "SwiftStudyCoach Tests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B64BA57C302C382800A246B3 /* Debug */,
+				B64BA57D302C382800A246B3 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

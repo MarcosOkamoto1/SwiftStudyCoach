@@ -4,11 +4,14 @@
 //
 //  Camada de persistência/orquestração entre a UI e o StudyGenerator.
 //  Responsável por: (1) servir um StudyTopic do cache quando possível, sem
-//  nenhuma chamada nova ao Foundation Models; (2) gerar e persistir TUDO,
-//  de forma síncrona (Plano V4 Fase 1), na primeira visita a um tópico;
-//  (3) sortear o quiz a partir do pool já existente; (4) crescimento em
-//  background só como rede de segurança (pool incompleto) e top-up
-//  pós-sessão (replenishAfterSession).
+//  nenhuma chamada nova ao Foundation Models; (2) na primeira visita a um
+//  tópico, gerar e persistir de forma BLOQUEANTE só o que a tela mostra de
+//  imediato — resumo, exemplo de código e quiz fácil/média — com as trilhas
+//  FM e MLX em PARALELO (Plano V6; o V4 gerava tudo em série e a tela de
+//  loading levava vários minutos); difícil e análise de código são gerados
+//  em background logo em seguida; (3) sortear o quiz a partir do pool já
+//  existente; (4) crescimento em background como rede de segurança (pool
+//  incompleto) e top-up pós-sessão (replenishAfterSession).
 //
 
 import Foundation
@@ -175,6 +178,8 @@ final class TopicRepository {
         // ficar atrás de trabalho de segundo plano na fila do orchestrator.
         await GenerationOrchestrator.shared.cancelPending(priority: .poolFill)
 
+        let totalStart = Date()
+
         // Contexto de documentação recuperado uma única vez e reaproveitado
         // nas chamadas de geração abaixo. Plano V5: dataset caiu pra 3
         // tópicos com no máximo 3 chunks cada — topK 3 pega o tópico
@@ -185,49 +190,49 @@ final class TopicRepository {
         let context = await generator.retrieveContext(for: topic, topK: 3)
         let codeContext = await generator.retrieveContext(for: topic, topK: 2)
 
-        // Plano V4 Fase 1 — fluxo 100% SÍNCRONO: gera TUDO em variáveis
-        // locais, numa cadeia linear de awaits (sem Trilha A/Trilha B
-        // concorrentes), e só insere/salva no SwiftData quando resumo,
-        // passo a passo, quiz completo (fácil+média+difícil, nas metas) e
-        // análise de código estiverem prontos. A tela de loading
-        // (TopicStudyView.isLoading) só libera quando este método retorna
-        // — a página só abre com tudo pronto. Se qualquer chamada falhar,
-        // o throws propaga antes de tocar no modelContext e nada fica
-        // persistido pela metade.
+        // Plano V6 — o caminho BLOQUEANTE gera só o que a tela mostra de
+        // imediato: resumo + quiz fácil/média (trilha FM) e exemplo de
+        // código (trilha MLX), com as DUAS trilhas em paralelo via
+        // `async let` — o download/carga do modelo MLX (passo mais caro na
+        // 1ª execução) acontece ENQUANTO o Foundation Models gera resumo e
+        // quiz, em vez de depois. As filas do GenerationOrchestrator já
+        // garantem uma chamada por motor por vez, então o paralelismo aqui
+        // é seguro por construção.
         //
-        // Ordem: FM primeiro (resumo + quiz fácil/média — rápido, sem
-        // download), e só depois o MLX carrega o modelo e faz, em
-        // sequência, passo a passo → quiz difícil → análise de código
-        // (cada um via rascunho MLX + formatação FM).
+        // Quiz difícil e análise de código (as etapas MLX-pesadas, que eram
+        // ~80% do tempo total do V4) saem do caminho bloqueante e vão pro
+        // crescimento em background logo após persistir — a UI já
+        // desabilita/anota os botões de sessão conforme o pool cresce.
         // Plano V3 3.1 (mantido): todo lote passa pelo QuestionValidator.
-        let summary = try await generator.generateSummary(topic: topic, context: context)
-
-        let rawEasy = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .easy, count: targetEasy)
-        let easy = await QuestionValidator.processQuizBatch(rawEasy) {
-            try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .easy, count: 1).first
+        let generator = self.generator
+        // taskType aqui é `nil` de propósito: este `timed` mede o PIPELINE
+        // inteiro do exemplo de código (rascunho MLX + crítica FM + formatação
+        // FM), que já são instrumentados individualmente dentro de
+        // `StudyGenerator` (taskTypes `.codeExampleDraft`/`.codeExampleCritique`/
+        // `.codeExampleFormat`) — registrar de novo aqui duplicaria a métrica
+        // sob um taskType que não corresponde a nenhuma chamada real.
+        async let exampleTask = Self.timed("exemplo de código (trilha MLX)") {
+            try await generator.generateCodeExample(topic: topic, context: codeContext)
         }
-        let rawMedium = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .medium, count: targetMedium)
-        let medium = await QuestionValidator.processQuizBatch(rawMedium) {
-            try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .medium, count: 1).first
+
+        let summary = try await Self.timed("resumo", topic: topic) {
+            try await generator.generateSummary(topic: topic, context: context)
         }
 
-        // A partir daqui entra o MLX (download do modelo na 1ª execução —
-        // a tela de loading mostra o progresso via ModelDownloadView).
-        let example = try await generator.generateCodeExample(topic: topic, context: codeContext)
+        let easy = try await Self.timed("quiz fácil (\(targetEasy) + validação)", topic: topic) {
+            let raw = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .easy, count: self.targetEasy)
+            return await QuestionValidator.processQuizBatch(raw, topic: topic, taskType: .easyQuiz) {
+                try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .easy, count: 1).first
+            }
+        }
+        let medium = try await Self.timed("quiz média (\(targetMedium) + validação)", topic: topic) {
+            let raw = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .medium, count: self.targetMedium)
+            return await QuestionValidator.processQuizBatch(raw, topic: topic, taskType: .mediumQuiz) {
+                try await generator.generateQuizBatch(topic: topic, context: context, difficulty: .medium, count: 1).first
+            }
+        }
 
-        // Hotfix pós-teste: pedir o alvo inteiro (6) numa chamada só fazia o
-        // StudyGenerator completar item a item, SEM limite, sempre que o MLX
-        // devolvia menos rascunhos que o pedido num lote (visto com o Qwen
-        // 3B em lotes grandes — separador nem sempre respeitado; o Qwen3-Coder
-        // MoE atual segue formato com bem mais consistência, mas o padrão de
-        // lotes pequenos + desistência é mantido como defesa, sem custo real).
-        // generateQuizPool/generateCodeAnalysisPool reintroduzem o mesmo
-        // padrão de resiliência que já existia em growDifficulty/
-        // growCodeAnalysis (lotes pequenos + desistência após 3 lotes
-        // vazios seguidos), mas de forma síncrona — evita a maratona de
-        // gerações MLX sequenciais que travava a tela de loading inteira.
-        let hard = await generateQuizPool(topic: topic, context: context, difficulty: .hard, target: targetHard)
-        let analysis = await generateCodeAnalysisPool(topic: topic, context: context, target: targetCodeAnalysis)
+        let example = try await exampleTask
 
         let studyTopic = StudyTopic(
             name: topic,
@@ -237,20 +242,58 @@ final class TopicRepository {
             walkthroughSnippets: example.walkthrough.map(\.snippet),
             walkthroughExplanations: example.walkthrough.map(\.explanation)
         )
-        studyTopic.quizPool = (easy + medium + hard).map { PersistedQuizQuestion(from: $0) }
-        studyTopic.codeAnalysisPool = analysis.map { PersistedCodeAnalysisQuestion(from: $0) }
+        studyTopic.quizPool = (easy + medium).map { PersistedQuizQuestion(from: $0) }
+        studyTopic.codeAnalysisPool = []
 
         modelContext.insert(studyTopic)
         try modelContext.save()
 
-        // Plano V4 Fase 1: NENHUM crescimento em background no caminho de
-        // criação inicial — o pool já nasce completo (nas metas). O
-        // startBackgroundGrowthIfNeeded continua existindo só como rede de
-        // segurança pra pool incompleto (validador descartou itens, app
-        // fechado no meio — ver fetchOrCreate) e pro top-up pós-sessão
-        // (replenishAfterSession), que roda depois que o usuário já fechou
-        // a sessão, não durante o carregamento de nenhuma tela.
+        print("⏱️ generateAndPersist('\(topic)'): tela liberada em \(String(format: "%.1f", Date().timeIntervalSince(totalStart)))s — difícil + análise de código seguem em background.")
+
+        // Difícil + análise de código em background, alvo cheio (também
+        // repõe fácil/média se o validador descartou itens). Prioridade
+        // .nextSession: o usuário já está na tela do tópico e pode iniciar
+        // um quiz em breve — mais urgente que poolFill genérico, mas atrás
+        // de qualquer geração user-blocking de outro tópico.
+        startBackgroundGrowthIfNeeded(
+            for: studyTopic, topicName: topic, context: context,
+            targets: (targetEasy, targetMedium, targetHard, targetCodeAnalysis),
+            priority: .nextSession
+        )
         return studyTopic
+    }
+
+    /// Instrumentação (Plano V6, PLAN_00): loga a duração de cada etapa de
+    /// geração — é isso que permite ver, no console, onde o tempo realmente
+    /// vai — e agora TAMBÉM alimenta a `GenerationMetricsStore` com o mesmo
+    /// dado estruturado, além do `print` já existente (aditivo, o `print`
+    /// não foi removido).
+    private static func timed<T>(
+        _ name: String,
+        topic: String = "",
+        engine: GenerationMetrics.Engine = .foundationModels,
+        taskType: GenerationMetrics.TaskType? = nil,
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        let start = Date()
+        defer {
+            let elapsedMs = Date().timeIntervalSince(start) * 1000
+            print("⏱️ [\(name)] \(String(format: "%.1f", elapsedMs / 1000))s")
+            if let taskType {
+                Task {
+                    await GenerationMetricsStore.shared.record(
+                        GenerationMetrics(
+                            engine: engine,
+                            taskType: taskType,
+                            topic: topic,
+                            modelID: engine == .mlx ? MLXService.modelID : "system",
+                            totalTimeMs: elapsedMs
+                        )
+                    )
+                }
+            }
+        }
+        return try await body()
     }
 
     /// Plano V3 4.1 — top-up pós-sessão: chamado quando uma sessão de quiz
@@ -278,74 +321,6 @@ final class TopicRepository {
             targets: (targetEasy, targetMedium, targetHard, targetCodeAnalysis),
             priority: .nextSession
         )
-    }
-
-    /// Gera o pool de UMA dificuldade em lotes pequenos (≤3), com o mesmo
-    /// padrão de resiliência de `growDifficulty` (validador por lote +
-    /// desistência após 3 lotes vazios seguidos), mas de forma síncrona —
-    /// usado no caminho de criação inicial (Fase 1) pra quiz difícil, que
-    /// passa pelo MLX. Nunca lança: se um lote falhar (erro do MLX/modelo
-    /// indisponível) ou a desistência for atingida, retorna o que já tiver
-    /// juntado — um pool abaixo do alvo aqui não é fatal, porque
-    /// `fetchOrCreate` detecta o pool incompleto na próxima visita e
-    /// completa em background (Fase 4-safe, sem travar a UI).
-    private func generateQuizPool(topic: String, context: String, difficulty: Difficulty, target: Int) async -> [QuizQuestion] {
-        var results: [QuizQuestion] = []
-        var consecutiveEmptyBatches = 0
-
-        while results.count < target {
-            let batchSize = min(3, target - results.count)
-            do {
-                let raw = try await generator.generateQuizBatch(topic: topic, context: context, difficulty: difficulty, count: batchSize)
-                let batch = await QuestionValidator.processQuizBatch(raw) {
-                    try await self.generator.generateQuizBatch(topic: topic, context: context, difficulty: difficulty, count: 1).first
-                }
-                if batch.isEmpty {
-                    consecutiveEmptyBatches += 1
-                    if consecutiveEmptyBatches >= 3 {
-                        print("❌ TopicRepository: 3 lotes seguidos de '\(difficulty.rawValue)' descartados pelo validador pra '\(topic)' — seguindo com \(results.count)/\(target) (top-up completa depois).")
-                        break
-                    }
-                    continue
-                }
-                consecutiveEmptyBatches = 0
-                results.append(contentsOf: batch)
-            } catch {
-                print("⚠️ TopicRepository: erro ao gerar lote '\(difficulty.rawValue)' pra '\(topic)': \(StudyGeneratorError.describe(error)) — seguindo com \(results.count)/\(target).")
-                break
-            }
-        }
-        return results
-    }
-
-    /// Equivalente a `generateQuizPool`, mas pro pool de análise de código.
-    private func generateCodeAnalysisPool(topic: String, context: String, target: Int) async -> [CodeAnalysisQuestion] {
-        var results: [CodeAnalysisQuestion] = []
-        var consecutiveEmptyBatches = 0
-
-        while results.count < target {
-            let batchSize = min(3, target - results.count)
-            do {
-                let raw = try await generator.generateCodeAnalysisBatch(topic: topic, context: context, count: batchSize)
-                let batch = await QuestionValidator.processCodeAnalysisBatch(raw) {
-                    try await self.generator.generateCodeAnalysisBatch(topic: topic, context: context, count: 1).first
-                }
-                if batch.isEmpty {
-                    consecutiveEmptyBatches += 1
-                    if consecutiveEmptyBatches >= 3 {
-                        print("❌ TopicRepository: 3 lotes seguidos de análise de código descartados pelo validador pra '\(topic)' — seguindo com \(results.count)/\(target) (top-up completa depois).")
-                        break
-                    }
-                    continue
-                }
-                consecutiveEmptyBatches = 0
-                results.append(contentsOf: batch)
-            } catch {
-                print("⚠️ TopicRepository: erro ao gerar lote de análise de código pra '\(topic)': \(StudyGeneratorError.describe(error)) — seguindo com \(results.count)/\(target).")
-                break
-            }
-        }
-        return results
     }
 
     private func sample(from pool: [PersistedQuizQuestion], count: Int, label: String) -> [PersistedQuizQuestion] {
@@ -388,7 +363,9 @@ final class TopicRepository {
         let container = modelContext.container
         let generator = self.generator
 
-        Task.detached(priority: .background) {
+        // .utility, não .background: QoS .background é a primeira vítima do
+        // App Nap/throttling do macOS quando o app perde o foco.
+        Task.detached(priority: .utility) {
             await TopicRepository.growPoolInBackground(
                 topicID: topicID,
                 container: container,
@@ -421,6 +398,20 @@ final class TopicRepository {
         targets: (easy: Int, medium: Int, hard: Int, codeAnalysis: Int),
         priority: GenerationOrchestrator.Priority
     ) async {
+        // App Nap (macOS): sem isso, o app perder o foco (ou minimizar a
+        // janela) faz o sistema estrangular CPU/timers/I/O do processo e a
+        // geração em background praticamente PARA até o app voltar ao foco.
+        // `.userInitiatedAllowingIdleSystemSleep` desativa o App Nap durante
+        // a atividade, mas ainda permite o Mac dormir normalmente;
+        // `.automaticTerminationDisabled` evita o sistema encerrar o app
+        // "ocioso" no meio da geração. O endActivity no defer garante que o
+        // sistema volta ao comportamento normal ao terminar (sucesso ou erro).
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .automaticTerminationDisabled],
+            reason: "Gerando pool de questões de '\(topicName)' em background"
+        )
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+
         await withTaskGroup(of: Void.self) { group in
 
             // Trilha A — Foundation Models (fácil + média)
@@ -509,7 +500,17 @@ final class TopicRepository {
                 count: batchSize,
                 priority: priority
             )
-            let batch = await QuestionValidator.processQuizBatch(rawBatch) {
+            // PLAN_00: taskType aproximado a partir da dificuldade — usado só
+            // para identificar de qual pool veio o retryCount registrado,
+            // não afeta a validação em si.
+            let taskType: GenerationMetrics.TaskType = {
+                switch difficulty {
+                case .easy: return .easyQuiz
+                case .medium: return .mediumQuiz
+                case .hard: return .hardQuizDraft
+                }
+            }()
+            let batch = await QuestionValidator.processQuizBatch(rawBatch, topic: topicName, taskType: taskType) {
                 try await generator.generateQuizBatch(topic: topicName, context: context, difficulty: difficulty, count: 1, priority: priority).first
             }
 
@@ -555,7 +556,7 @@ final class TopicRepository {
                 count: batchSize,
                 priority: priority
             )
-            let batch = await QuestionValidator.processCodeAnalysisBatch(rawBatch) {
+            let batch = await QuestionValidator.processCodeAnalysisBatch(rawBatch, topic: topicName, taskType: .codeAnalysisDraft) {
                 try await generator.generateCodeAnalysisBatch(topic: topicName, context: context, count: 1, priority: priority).first
             }
 

@@ -117,16 +117,25 @@ actor GenerationOrchestrator {
         queue.insert(job, at: index)
     }
 
+    /// Prioridade FIXA (.userInitiated) pros workers — `Task { }` sem
+    /// prioridade herda a de quem enfileirou o PRIMEIRO job do ciclo, então
+    /// um worker acordado por um job de poolFill (task .utility) rodava o
+    /// loop inteiro de geração estrangulado pelo QoS baixo — inclusive jobs
+    /// user-blocking que entrassem na fila depois (inversão de prioridade).
+    /// Era isso que fazia o crescimento em background parecer bem mais
+    /// lento que a mesma geração no caminho bloqueante. A URGÊNCIA entre
+    /// jobs continua sendo responsabilidade exclusiva da ordenação da fila
+    /// (Priority); o QoS de execução é sempre o mesmo.
     private func startFMWorkerIfNeeded() {
         guard !fmWorkerActive else { return }
         fmWorkerActive = true
-        Task { await runFMWorker() }
+        Task(priority: .userInitiated) { await runFMWorker() }
     }
 
     private func startMLXWorkerIfNeeded() {
         guard !mlxWorkerActive else { return }
         mlxWorkerActive = true
-        Task { await runMLXWorker() }
+        Task(priority: .userInitiated) { await runMLXWorker() }
     }
 
     private func runFMWorker() async {

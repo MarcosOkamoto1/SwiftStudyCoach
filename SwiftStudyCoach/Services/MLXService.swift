@@ -4,23 +4,27 @@
 //
 //  Created by Geovana Cena de Albuquerque on 05/08/26.
 //
-//  Melhorias desta versão:
-//  - Sobe pro Qwen3-Coder-30B-A3B-Instruct-4bit (~17,2 GB): app é exclusivo
-//    pra MacBook com 24 GB de RAM unificada, então cabe com folga. É MoE —
-//    30B de parâmetros totais mas só ~3B ATIVOS por token — então a
-//    velocidade de geração fica perto de um denso pequeno, mesmo com um
-//    download bem maior. Geração Qwen3 (mais nova que a linha 2.5 usada nas
-//    versões anteriores: 3B-4bit ~1,7 GB, 7B-4bit ~4,3 GB, 14B-4bit ~8,3 GB),
-//    treinada especificamente pra coding/agentic — segue instruções
-//    complexas (checklist de erros comuns, não inventar API, respeitar
-//    itemSeparator em lotes) com bem mais consistência que a linha 2.5.
-//    Suporte oficial confirmado no mlx-swift-lm via LLMTypeRegistry
-//    "qwen3_moe". Trade-off: download maior — mitigado pelos lotes pequenos
-//    (≤3) com desistência do TopicRepository (Plano V4, hotfix pós-teste).
+//  Melhorias desta versão (Plano V6 — diagnóstico de latência):
+//  - VOLTA pro Qwen2.5-Coder-7B-Instruct-4bit (~4,3 GB). O Qwen3-Coder MoE
+//    30B-A3B-4bit (~17,2 GB) não cabia de forma saudável na máquina-alvo:
+//    o macOS limita a memória wired da GPU a ~75% da RAM unificada (~18 GB
+//    num Mac de 24 GB), e 17,2 GB de pesos + KV cache + ativações + app +
+//    Foundation Models + sistema estouravam isso — swap/pressão de memória
+//    derrubava a geração de dezenas de tokens/s pra poucos. O 7B denso
+//    elimina o swap, corta o download de 17,2 GB → 4,3 GB e carrega na RAM
+//    em segundos em vez de minutos.
+//  - Pasta local de override restaurada, agora DERIVADA do modelID
+//    (~/mlx-models/<repo-em-minúsculas>): se os pesos foram baixados
+//    manualmente via `hf download` (bem mais rápido que o downloader do
+//    swift-transformers), o app carrega direto deles, sem rede. Se a pasta
+//    não existir, cai automaticamente pro download normal do Hugging Face
+//    na primeira execução (a ModelDownloadView mostra o progresso).
 //  - Progresso de download real (fração + velocidade + ETA) exposto de
 //    forma observável — ver ModelDownloadView.
 //  - Geração de rascunhos em LOTE (generateQuestionDrafts): um único
 //    prefill do prompt para N itens, em vez de um prefill por item.
+//  - Instrumentação de tempo: loadModel e generate logam duração (e
+//    chars/s na geração) pra diagnosticar onde o tempo é gasto.
 //
 
 import Foundation
@@ -34,31 +38,30 @@ final class MLXService {
     static let shared = MLXService()
 
     /// ID do modelo no Hugging Face (mlx-community). Constante separada de
-    /// propósito: facilita A/B com o 1.5B/3B/7B/14B da linha Qwen2.5-Coder
-    /// (menores, mais rápidos, usados em versões anteriores). App é Mac-only
-    /// com 24 GB de RAM, então sobe pro Qwen3-Coder MoE 30B-A3B — ver
-    /// comentário do cabeçalho do arquivo.
-    static let modelID = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+    /// propósito: facilita A/B com outros tamanhos da linha Qwen2.5-Coder
+    /// (1.5B/3B/14B) ou com o Qwen3-Coder MoE 30B-A3B (testado e revertido —
+    /// ver comentário do cabeçalho do arquivo: não cabia na RAM sem swap).
+    static let modelID = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
 
     /// Tamanho aproximado do download (usado pra estimar MB e velocidade —
-    /// o progress do Hub reporta fração, não bytes). 17,2 GB confirmado na
-    /// página do modelo no Hugging Face.
-    static let estimatedModelBytes: Int64 = 17_200_000_000
+    /// o progress do Hub reporta fração, não bytes). ~4,3 GB na página do
+    /// modelo no Hugging Face.
+    static let estimatedModelBytes: Int64 = 4_300_000_000
 
     /// Linha separadora usada nos prompts/parse de geração em lote.
     static let itemSeparator = "====="
 
-    /// Pasta local opcional com os pesos já baixados manualmente (ex: via
-    /// `hf download mlx-community/... --local-dir ~/mlx-models/...`, bem
-    /// mais rápido que o downloader do swift-transformers — ver Plano V5).
-    /// Se essa pasta existir e tiver pesos de verdade, `performLoad` carrega
-    /// direto dela via `ModelConfiguration(directory:)`, sem rede e sem
-    /// passar pelo HubApi. Caminho pessoal desta máquina de desenvolvimento;
-    /// em qualquer outra máquina (ou se a pasta for apagada) a pasta
-    /// simplesmente não existe e o app cai automaticamente pro download
-    /// normal via `modelID` — não quebra nada pra ninguém mais.
+    /// Pasta local opcional com os pesos já baixados manualmente, ex:
+    /// `hf download mlx-community/Qwen2.5-Coder-7B-Instruct-4bit --local-dir ~/mlx-models/qwen2.5-coder-7b-instruct-4bit`
+    /// O nome da pasta é derivado do `modelID` (repo em minúsculas), então
+    /// trocar o modelo pra A/B troca a pasta esperada automaticamente. Se a
+    /// pasta existir e tiver pesos de verdade (.safetensors), `performLoad`
+    /// carrega direto dela via `ModelConfiguration(directory:)`, sem rede e
+    /// sem HubApi; senão, cai pro download normal via `modelID` — não
+    /// quebra nada em outra máquina.
     private static var localModelOverrideDirectory: URL? {
-        let path = ("~/mlx-models/qwen3-coder-30b-a3b" as NSString).expandingTildeInPath
+        guard let repo = modelID.split(separator: "/").last else { return nil }
+        let path = ("~/mlx-models/\(repo.lowercased())" as NSString).expandingTildeInPath
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
             return nil
@@ -92,6 +95,14 @@ final class MLXService {
     private var isLoaded = false
     private var loadTask: Task<Void, Error>?
 
+    /// PLAN_00 — vira `false` assim que a 1ª geração real acontece depois de
+    /// um `loadModel()`. Usado só para popular `GenerationMetrics.isColdStart`
+    /// nas chamadas de `generate` (aproximação de "esta foi a 1ª inferência
+    /// depois dos pesos carregarem", relevante para diagnosticar o warm-up
+    /// de grafo/kernels Metal citado no PLAN_12 — não é o mesmo sinal que o
+    /// `isColdStart` do próprio carregamento dos pesos, ver `performLoad`).
+    private var hasGeneratedSinceLoad = false
+
     private init() {}
 
     // MARK: - Carregamento / download
@@ -109,7 +120,11 @@ final class MLXService {
             return
         }
 
-        let task = Task { try await performLoad() }
+        // Prioridade fixa: sem ela, a Task herda o QoS de quem chamou
+        // primeiro — se o 1º gatilho fosse o pré-aquecimento/crescimento em
+        // background (.utility), o download + carga dos pesos inteiros
+        // rodavam estrangulados, mesmo que o usuário passasse a esperar.
+        let task = Task(priority: .userInitiated) { try await performLoad() }
         loadTask = task
         do {
             try await task.value
@@ -130,10 +145,13 @@ final class MLXService {
             print("🟢 MLXService: pesos locais encontrados em \(localDir.path) — carregando direto, sem download.")
             modelConfiguration = ModelConfiguration(directory: localDir)
         } else {
+            // Download normal via Hugging Face na 1ª execução (com progresso
+            // na ModelDownloadView); depois carrega do cache local.
             modelConfiguration = ModelConfiguration(id: Self.modelID)
         }
 
-        print("Carregando modelo MLX (\(Self.modelID))...")
+        let loadStart = Date()
+        print("⏱️ MLXService: carregando modelo (\(Self.modelID))...")
         do {
             self.modelContainer = try await LLMModelFactory.shared.loadContainer(
                 configuration: modelConfiguration
@@ -146,10 +164,28 @@ final class MLXService {
                 }
             }
             self.isLoaded = true
+            self.hasGeneratedSinceLoad = false
             loadState = .ready
             downloadSpeedBytesPerSecond = nil
             downloadETASeconds = nil
-            print("Modelo MLX carregado com sucesso!")
+            let loadElapsedMs = Date().timeIntervalSince(loadStart) * 1000
+            print("⏱️ MLXService: modelo pronto em \(String(format: "%.1f", loadElapsedMs / 1000))s (download + carga na RAM).")
+
+            // PLAN_00 §10.2: o carregamento em si (download + carga na RAM)
+            // também vira uma métrica — antes só existia o `print` acima.
+            let modelID = Self.modelID
+            Task {
+                await GenerationMetricsStore.shared.record(
+                    GenerationMetrics(
+                        engine: .mlx,
+                        taskType: .modelLoad,
+                        topic: "",
+                        modelID: modelID,
+                        isColdStart: true,
+                        totalTimeMs: loadElapsedMs
+                    )
+                )
+            }
         } catch {
             loadState = .failed(error.localizedDescription)
             throw error
@@ -197,8 +233,17 @@ final class MLXService {
     // MARK: - Geração
 
     /// Gera UM rascunho de texto livre.
-    func generateQuestionDraft(systemPrompt: String, promptContext: String) async throws -> String {
-        try await generate(systemPrompt: systemPrompt, promptContext: promptContext, maxTokens: 350)
+    ///
+    /// `topic`/`taskType` (PLAN_00) são só para instrumentação — identificam
+    /// a métrica gerada por esta chamada, sem afetar o prompt nem o
+    /// resultado.
+    func generateQuestionDraft(
+        systemPrompt: String,
+        promptContext: String,
+        topic: String = "",
+        taskType: GenerationMetrics.TaskType = .hardQuizDraft
+    ) async throws -> String {
+        try await generate(systemPrompt: systemPrompt, promptContext: promptContext, maxTokens: 350, topic: topic, taskType: taskType, batchSize: 1)
     }
 
     /// Gera N rascunhos numa ÚNICA chamada ao modelo (um prefill só), com os
@@ -206,15 +251,24 @@ final class MLXService {
     /// responsável por pedir os itens separados por essa linha; aqui a
     /// resposta é fatiada e higienizada. Pode devolver menos itens que
     /// `count` — o chamador decide se completa um a um.
-    func generateQuestionDrafts(systemPrompt: String, promptContext: String, count: Int) async throws -> [String] {
+    func generateQuestionDrafts(
+        systemPrompt: String,
+        promptContext: String,
+        count: Int,
+        topic: String = "",
+        taskType: GenerationMetrics.TaskType = .hardQuizDraft
+    ) async throws -> [String] {
         guard count > 1 else {
-            return [try await generateQuestionDraft(systemPrompt: systemPrompt, promptContext: promptContext)]
+            return [try await generateQuestionDraft(systemPrompt: systemPrompt, promptContext: promptContext, topic: topic, taskType: taskType)]
         }
 
         let output = try await generate(
             systemPrompt: systemPrompt,
             promptContext: promptContext,
-            maxTokens: 300 * count + 50
+            maxTokens: 300 * count + 50,
+            topic: topic,
+            taskType: taskType,
+            batchSize: count
         )
 
         let items = output
@@ -287,34 +341,95 @@ final class MLXService {
     /// primeira vez. Sem cache local detectado, não faz absolutamente
     /// nada — nenhum download é disparado por conta própria.
     func prewarmIfCached() {
-        guard Self.isModelLikelyCached() else {
+        // A pasta de override local também conta como "em cache" — sem
+        // isso, o pré-aquecimento no launch nunca dispararia no caminho de
+        // pesos baixados manualmente.
+        guard Self.isModelLikelyCached() || Self.localModelOverrideDirectory != nil else {
             print("⚪️ MLXService: nenhum cache local detectado pro modelo — sem pré-aquecimento (download só sob demanda).")
             return
         }
         print("🟢 MLXService: modelo parece estar em cache local — pré-aquecendo em background.")
-        Task.detached(priority: .background) {
+        // .utility, não .background: QoS .background é estrangulado pelo
+        // macOS (I/O e CPU despriorizados) e deixava a carga dos pesos
+        // visivelmente mais lenta do que o necessário.
+        Task.detached(priority: .utility) {
             try? await MLXService.shared.loadModel()
         }
     }
 
-    private func generate(systemPrompt: String, promptContext: String, maxTokens: Int) async throws -> String {
+    private func generate(
+        systemPrompt: String,
+        promptContext: String,
+        maxTokens: Int,
+        topic: String = "",
+        taskType: GenerationMetrics.TaskType = .hardQuizDraft,
+        batchSize: Int = 1
+    ) async throws -> String {
         guard let container = modelContainer else {
             throw NSError(domain: "MLXService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Modelo MLX não carregado."])
         }
 
         let fullPrompt = "<|im_start|>system\n\(systemPrompt)<|im_end|>\n<|im_start|>user\n\(promptContext)<|im_end|>\n<|im_start|>assistant\n"
         let generateParams = GenerateParameters(maxTokens: maxTokens, temperature: 0.3, repetitionPenalty: 1.1)
+
+        // PLAN_00: "1ª geração depois do load" — aproximação de cold start
+        // de INFERÊNCIA (compilação de kernels Metal), distinta do cold
+        // start de CARREGAMENTO DE PESOS (isColdStart do modelLoad em
+        // performLoad). Lida/marcada ANTES da chamada, já que o valor real
+        // que nos interessa é "esta chamada aconteceu antes de qualquer
+        // outra geração desde o load".
+        let isColdStart = !hasGeneratedSinceLoad
+        hasGeneratedSinceLoad = true
+
+        let start = Date()
         let stream = try await container.perform { context in
             let input = try await context.processor.prepare(input: .init(prompt: fullPrompt))
             return try MLXLMCommon.generate(input: input, parameters: generateParams, context: context)
         }
 
         var outputText = ""
+        var completionInfo: GenerateCompletionInfo?
         for try await generation in stream {
-            if let chunk = generation.chunk {
+            switch generation {
+            case .chunk(let chunk):
                 outputText.append(chunk)
+            case .info(let info):
+                // PLAN_00 (F9): API real do mlx-swift-examples devolve
+                // promptTokenCount/generationTokenCount/promptTime/
+                // generateTime/tokensPerSecond prontos — isso substitui
+                // diretamente a antiga métrica de "chars/s", que era só uma
+                // aproximação (caracteres, não tokens).
+                completionInfo = info
+            case .toolCall:
+                break // sem suporte a tool calls neste fluxo de rascunhos.
             }
         }
+
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
+        if let info = completionInfo {
+            print("⏱️ MLXService.generate: \(info.summary().replacingOccurrences(of: "\n", with: " · "))")
+        } else {
+            // Defensivo: a variante em stream sempre emite `.info` ao
+            // terminar (ver Evaluate.swift), mas se por algum motivo não
+            // emitir, ainda registramos o tempo total sem os tokens/s.
+            print("⏱️ MLXService.generate: \(String(format: "%.1f", elapsedMs / 1000))s, \(outputText.count) chars (sem GenerateCompletionInfo).")
+        }
+
+        let metric = GenerationMetrics(
+            engine: .mlx,
+            taskType: taskType,
+            topic: topic,
+            modelID: Self.modelID,
+            isColdStart: isColdStart,
+            inputTokenCount: completionInfo?.promptTokenCount,
+            outputTokenCount: completionInfo?.generationTokenCount,
+            timeToFirstTokenMs: completionInfo.map { $0.promptTime * 1000 },
+            decodeTimeMs: completionInfo.map { $0.generateTime * 1000 },
+            totalTimeMs: elapsedMs,
+            tokensPerSecond: completionInfo?.tokensPerSecond,
+            batchSize: batchSize
+        )
+        Task { await GenerationMetricsStore.shared.record(metric) }
 
         return outputText
     }

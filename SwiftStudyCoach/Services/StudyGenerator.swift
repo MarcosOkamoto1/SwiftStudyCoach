@@ -116,6 +116,47 @@ final class StudyGenerator {
         return model
     }
 
+    // MARK: - Instrumentação (PLAN_00)
+
+    /// Cronômetro em torno de UMA chamada ao Foundation Models, no mesmo
+    /// padrão de `TopicRepository.timed` — mede o tempo total e alimenta a
+    /// `GenerationMetricsStore`, além de manter o `print` de diagnóstico já
+    /// usado no resto do projeto. `inputTokenCount`/`outputTokenCount`
+    /// ficam `nil`: a API pública do `FoundationModels` (framework fechado)
+    /// não expõe contagem de tokens nesta versão — `Needs runtime
+    /// measurement` (ver PLAN_00, SOLUTIONS_PLAN.md §10.2).
+    private static func timed<T>(
+        _ name: String,
+        engine: GenerationMetrics.Engine,
+        taskType: GenerationMetrics.TaskType,
+        topic: String,
+        ragContextChars: Int = 0,
+        ragChunkCount: Int = 0,
+        batchSize: Int = 1,
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        let start = Date()
+        defer {
+            let elapsedMs = Date().timeIntervalSince(start) * 1000
+            print("⏱️ [\(name)] \(String(format: "%.1f", elapsedMs / 1000))s")
+            Task {
+                await GenerationMetricsStore.shared.record(
+                    GenerationMetrics(
+                        engine: engine,
+                        taskType: taskType,
+                        topic: topic,
+                        modelID: engine == .mlx ? MLXService.modelID : "system",
+                        totalTimeMs: elapsedMs,
+                        ragContextChars: ragContextChars,
+                        ragChunkCount: ragChunkCount,
+                        batchSize: batchSize
+                    )
+                )
+            }
+        }
+        return try await body()
+    }
+
     // MARK: - Retry com degradação de contexto
 
     /// Reduz o contexto RAG pro primeiro chunk apenas (os chunks são
@@ -195,35 +236,37 @@ final class StudyGenerator {
         // Plano V3 4.2: toda a operação (incluindo os retries internos de
         // withDiagnostics) roda como UM job serializado na fila do FM —
         // nenhuma outra chamada ao Foundation Models entra no meio.
-        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-            try await self.withDiagnostics(step: "resumo do tópico", context: context) { ctx in
-                let session = LanguageModelSession(model: model, instructions: instructions)
+        return try await Self.timed("resumo do tópico (FM)", engine: .foundationModels, taskType: .summary, topic: topic, ragContextChars: context.count) {
+            try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                try await self.withDiagnostics(step: "resumo do tópico", context: context) { ctx in
+                    let session = LanguageModelSession(model: model, instructions: instructions)
 
-                let prompt: String
-                if ctx.isEmpty {
-                    prompt = """
-                    Tópico: \(topic)
+                    let prompt: String
+                    if ctx.isEmpty {
+                        prompt = """
+                        Tópico: \(topic)
 
-                    Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
-                    iniciante/intermediário, incluindo pontos-chave.
-                    """
-                } else {
-                    prompt = """
-                    Tópico: \(topic)
+                        Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
+                        iniciante/intermediário, incluindo pontos-chave.
+                        """
+                    } else {
+                        prompt = """
+                        Tópico: \(topic)
 
-                    Contexto da documentação oficial (use isso como base principal):
-                    \(ctx)
+                        Contexto da documentação oficial (use isso como base principal):
+                        \(ctx)
 
-                    Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
-                    iniciante/intermediário, incluindo pontos-chave.
-                    """
+                        Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
+                        iniciante/intermediário, incluindo pontos-chave.
+                        """
+                    }
+
+                    // Resumo mais longo (180-280 palavras, Plano V5) + 3-5 pontos-chave
+                    // precisa de mais orçamento que os 500 tokens antigos (100-150 palavras).
+                    let options = GenerationOptions(maximumResponseTokens: 750)
+                    let response = try await session.respond(to: prompt, generating: TopicSummary.self, options: options)
+                    return response.content
                 }
-
-                // Resumo mais longo (180-280 palavras, Plano V5) + 3-5 pontos-chave
-                // precisa de mais orçamento que os 500 tokens antigos (100-150 palavras).
-                let options = GenerationOptions(maximumResponseTokens: 750)
-                let response = try await session.respond(to: prompt, generating: TopicSummary.self, options: options)
-                return response.content
             }
         }
     }
@@ -268,7 +311,9 @@ final class StudyGenerator {
             let draft = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
                 try await MLXService.shared.generateQuestionDraft(
                     systemPrompt: "Você é um especialista em Swift. Gere um código de exemplo curto e uma explicação passo a passo, em texto puro, usando apenas APIs reais.",
-                    promptContext: mlxPrompt
+                    promptContext: mlxPrompt,
+                    topic: topic,
+                    taskType: .codeExampleDraft
                 )
             }
             print("🔵 [exemplo de código] rascunho MLX recebido (\(draft.count) chars) — formatando via Foundation Models.")
@@ -305,7 +350,7 @@ final class StudyGenerator {
         }
         let model = try requireModel()
 
-        let critique = try await critiqueCodeDraft(draft: cleanDraft, topic: topic, context: context, priority: priority)
+        let critique = try await critiqueCodeDraft(draft: cleanDraft, topic: topic, context: context, priority: priority, taskType: .codeExampleCritique)
         print("🔵 [exemplo de código] crítica técnica: \(critique.prefix(200))\(critique.count > 200 ? "…" : "")")
 
         let instructions = """
@@ -326,44 +371,46 @@ final class StudyGenerator {
         Responda sempre em português.
         """
 
-        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-            try await self.withDiagnostics(step: "formatação do exemplo de código", context: context) { ctx in
-                let session = LanguageModelSession(model: model, instructions: instructions)
+        return try await Self.timed("formatação do exemplo de código (FM)", engine: .foundationModels, taskType: .codeExampleFormat, topic: topic, ragContextChars: context.count) {
+            try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                try await self.withDiagnostics(step: "formatação do exemplo de código", context: context) { ctx in
+                    let session = LanguageModelSession(model: model, instructions: instructions)
 
-                let prompt = """
-                Contexto da documentação oficial (fonte de verdade — corrija o rascunho por isso):
-                \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
+                    let prompt = """
+                    Contexto da documentação oficial (fonte de verdade — corrija o rascunho por isso):
+                    \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
 
-                Rascunho gerado por outro modelo sobre '\(topic)':
-                \(cleanDraft)
+                    Rascunho gerado por outro modelo sobre '\(topic)':
+                    \(cleanDraft)
 
-                Revisão técnica do rascunho acima (aplique TODAS as correções apontadas aqui):
-                \(critique)
+                    Revisão técnica do rascunho acima (aplique TODAS as correções apontadas aqui):
+                    \(critique)
 
-                Reformate esse rascunho no exemplo de código explicado, com o walkthrough passo a passo,
-                já com as correções da revisão aplicadas.
-                """
+                    Reformate esse rascunho no exemplo de código explicado, com o walkthrough passo a passo,
+                    já com as correções da revisão aplicadas.
+                    """
 
-                // Plano V5, hotfix pós-teste: 1100 tokens não bastava pro código
-                // + passo a passo de 3-5 etapas em português (mais verboso que
-                // inglês em tokens) — visto ao vivo o código cortado mesmo
-                // DEPOIS do retry "8 linhas". Subiu o orçamento e o retry agora
-                // também pede um walkthrough mais curto, não só código curto,
-                // já que os dois competem pelo mesmo orçamento de tokens.
-                let options = GenerationOptions(maximumResponseTokens: 1600)
-                let response = try await session.respond(to: prompt, generating: ExplainedCodeExample.self, options: options)
-                let example = response.content
+                    // Plano V5, hotfix pós-teste: 1100 tokens não bastava pro código
+                    // + passo a passo de 3-5 etapas em português (mais verboso que
+                    // inglês em tokens) — visto ao vivo o código cortado mesmo
+                    // DEPOIS do retry "8 linhas". Subiu o orçamento e o retry agora
+                    // também pede um walkthrough mais curto, não só código curto,
+                    // já que os dois competem pelo mesmo orçamento de tokens.
+                    let options = GenerationOptions(maximumResponseTokens: 1600)
+                    let response = try await session.respond(to: prompt, generating: ExplainedCodeExample.self, options: options)
+                    let example = response.content
 
-                if Self.looksTruncated(example.code) {
-                    print("⚠️ [formatação do exemplo de código] código parece truncado — retry pedindo versão mais curta.")
-                    let retrySession = LanguageModelSession(model: model, instructions: instructions)
-                    let retryPrompt = prompt + "\n\nIMPORTANTE: mantenha NO MÁXIMO 8 linhas de código E NO MÁXIMO 3 passos curtos no walkthrough."
-                    let retry = try await retrySession.respond(to: retryPrompt, generating: ExplainedCodeExample.self, options: options)
-                    if !Self.looksTruncated(retry.content.code) {
-                        return retry.content
+                    if Self.looksTruncated(example.code) {
+                        print("⚠️ [formatação do exemplo de código] código parece truncado — retry pedindo versão mais curta.")
+                        let retrySession = LanguageModelSession(model: model, instructions: instructions)
+                        let retryPrompt = prompt + "\n\nIMPORTANTE: mantenha NO MÁXIMO 8 linhas de código E NO MÁXIMO 3 passos curtos no walkthrough."
+                        let retry = try await retrySession.respond(to: retryPrompt, generating: ExplainedCodeExample.self, options: options)
+                        if !Self.looksTruncated(retry.content.code) {
+                            return retry.content
+                        }
                     }
+                    return example
                 }
-                return example
             }
         }
     }
@@ -377,7 +424,7 @@ final class StudyGenerator {
     /// valor). Resposta em texto livre, sem schema (`respond(to:options:)`,
     /// sem `generating:`) — mais barato e não trava numa estrutura rígida
     /// pra uma lista curta de apontamentos.
-    private func critiqueCodeDraft(draft: String, topic: String, context: String, priority: GenerationOrchestrator.Priority) async throws -> String {
+    private func critiqueCodeDraft(draft: String, topic: String, context: String, priority: GenerationOrchestrator.Priority, taskType: GenerationMetrics.TaskType) async throws -> String {
         let model = try requireModel()
 
         let instructions = """
@@ -395,23 +442,25 @@ final class StudyGenerator {
         Responda sempre em português.
         """
 
-        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-            try await self.withDiagnostics(step: "crítica do exemplo de código", context: context) { ctx in
-                let session = LanguageModelSession(model: model, instructions: instructions)
+        return try await Self.timed("crítica do exemplo de código (FM)", engine: .foundationModels, taskType: taskType, topic: topic, ragContextChars: context.count) {
+            try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                try await self.withDiagnostics(step: "crítica do exemplo de código", context: context) { ctx in
+                    let session = LanguageModelSession(model: model, instructions: instructions)
 
-                let prompt = """
-                Contexto da documentação oficial:
-                \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
+                    let prompt = """
+                    Contexto da documentação oficial:
+                    \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
 
-                Rascunho de código Swift sobre '\(topic)':
-                \(draft)
+                    Rascunho de código Swift sobre '\(topic)':
+                    \(draft)
 
-                Liste os erros técnicos reais encontrados no rascunho acima (ou "OK - sem erros").
-                """
+                    Liste os erros técnicos reais encontrados no rascunho acima (ou "OK - sem erros").
+                    """
 
-                let options = GenerationOptions(maximumResponseTokens: 350)
-                let response = try await session.respond(to: prompt, options: options)
-                return response.content
+                    let options = GenerationOptions(maximumResponseTokens: 350)
+                    let response = try await session.respond(to: prompt, options: options)
+                    return response.content
+                }
             }
         }
     }
@@ -433,43 +482,45 @@ final class StudyGenerator {
         especificamente disso.
         """
 
-        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-            try await self.withDiagnostics(step: "exemplo de código", context: context) { ctx in
-                let session = LanguageModelSession(model: model, instructions: instructions)
+        return try await Self.timed("exemplo de código do zero (FM)", engine: .foundationModels, taskType: .codeExampleFormat, topic: topic, ragContextChars: context.count) {
+            try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                try await self.withDiagnostics(step: "exemplo de código", context: context) { ctx in
+                    let session = LanguageModelSession(model: model, instructions: instructions)
 
-                let prompt = """
-                Tópico: \(topic)
+                    let prompt = """
+                    Tópico: \(topic)
 
-                Contexto da documentação oficial:
-                \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
+                    Contexto da documentação oficial:
+                    \(ctx.isEmpty ? "Conhecimento geral de Swift, com cautela." : ctx)
 
-                Gere UM exemplo de código Swift (5-15 linhas, completo, sem cortes) que
-                ilustre o conceito principal do tópico, com a explicação passo a passo.
-                """
+                    Gere UM exemplo de código Swift (5-15 linhas, completo, sem cortes) que
+                    ilustre o conceito principal do tópico, com a explicação passo a passo.
+                    """
 
-                // Orçamento dedicado só pro exemplo — nada compete com ele.
-                // Precisa ser generoso: o walkthrough REPETE os trechos do código
-                // (snippet + explicação por passo), então a resposta é ~2x o
-                // tamanho do código em si.
-                // Plano V5: mesmo orçamento maior e retry com walkthrough mais
-                // curto do formatCodeExample — ver comentário lá.
-                let options = GenerationOptions(maximumResponseTokens: 1600)
-                let response = try await session.respond(to: prompt, generating: ExplainedCodeExample.self, options: options)
-                let example = response.content
+                    // Orçamento dedicado só pro exemplo — nada compete com ele.
+                    // Precisa ser generoso: o walkthrough REPETE os trechos do código
+                    // (snippet + explicação por passo), então a resposta é ~2x o
+                    // tamanho do código em si.
+                    // Plano V5: mesmo orçamento maior e retry com walkthrough mais
+                    // curto do formatCodeExample — ver comentário lá.
+                    let options = GenerationOptions(maximumResponseTokens: 1600)
+                    let response = try await session.respond(to: prompt, generating: ExplainedCodeExample.self, options: options)
+                    let example = response.content
 
-                // Detecção de truncamento: se o código parece incompleto
-                // (delimitadores desbalanceados / termina "no meio"), tenta UMA
-                // vez com um exemplo mais curto antes de aceitar.
-                if Self.looksTruncated(example.code) {
-                    print("⚠️ [exemplo de código] código parece truncado — retry pedindo exemplo mais curto.")
-                    let retrySession = LanguageModelSession(model: model, instructions: instructions)
-                    let retryPrompt = prompt + "\n\nIMPORTANTE: o exemplo deve ter NO MÁXIMO 8 linhas de código E NO MÁXIMO 3 passos curtos no walkthrough."
-                    let retry = try await retrySession.respond(to: retryPrompt, generating: ExplainedCodeExample.self, options: options)
-                    if !Self.looksTruncated(retry.content.code) {
-                        return retry.content
+                    // Detecção de truncamento: se o código parece incompleto
+                    // (delimitadores desbalanceados / termina "no meio"), tenta UMA
+                    // vez com um exemplo mais curto antes de aceitar.
+                    if Self.looksTruncated(example.code) {
+                        print("⚠️ [exemplo de código] código parece truncado — retry pedindo exemplo mais curto.")
+                        let retrySession = LanguageModelSession(model: model, instructions: instructions)
+                        let retryPrompt = prompt + "\n\nIMPORTANTE: o exemplo deve ter NO MÁXIMO 8 linhas de código E NO MÁXIMO 3 passos curtos no walkthrough."
+                        let retry = try await retrySession.respond(to: retryPrompt, generating: ExplainedCodeExample.self, options: options)
+                        if !Self.looksTruncated(retry.content.code) {
+                            return retry.content
+                        }
                     }
+                    return example
                 }
-                return example
             }
         }
     }
@@ -541,7 +592,9 @@ final class StudyGenerator {
                 try await MLXService.shared.generateQuestionDrafts(
                     systemPrompt: "Você é um especialista em Swift. Gere perguntas técnicas difíceis sobre conceitos da linguagem, em texto puro.",
                     promptContext: mlxPrompt,
-                    count: count
+                    count: count,
+                    topic: topic,
+                    taskType: .hardQuizDraft
                 )
             }
 
@@ -557,7 +610,9 @@ final class StudyGenerator {
                 let single = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
                     try await MLXService.shared.generateQuestionDraft(
                         systemPrompt: "Você é um especialista em Swift. Gere uma pergunta técnica difícil sobre um conceito da linguagem, em texto puro.",
-                        promptContext: mlxPrompt.replacingOccurrences(of: "Crie \(count) perguntas técnicas", with: "Crie UMA pergunta técnica")
+                        promptContext: mlxPrompt.replacingOccurrences(of: "Crie \(count) perguntas técnicas", with: "Crie UMA pergunta técnica"),
+                        topic: topic,
+                        taskType: .hardQuizDraft
                     )
                 }
                 let question = await formatHardQuestion(draft: single, topic: topic, difficulty: difficulty, priority: priority)
@@ -586,26 +641,29 @@ final class StudyGenerator {
         """
 
         let difficultyLabel = (difficulty == .easy) ? "FÁCIL" : "MÉDIA"
+        let taskType: GenerationMetrics.TaskType = (difficulty == .easy) ? .easyQuiz : .mediumQuiz
 
-        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-            try await self.withDiagnostics(step: "quiz \(difficultyLabel.lowercased())", context: context) { ctx in
-                let session = LanguageModelSession(model: model, instructions: instructions)
+        return try await Self.timed("quiz \(difficultyLabel.lowercased()) (FM)", engine: .foundationModels, taskType: taskType, topic: topic, ragContextChars: context.count, batchSize: count) {
+            try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                try await self.withDiagnostics(step: "quiz \(difficultyLabel.lowercased())", context: context) { ctx in
+                    let session = LanguageModelSession(model: model, instructions: instructions)
 
-                let prompt = """
-                Tópico: \(topic)
-                Contexto da documentação: \(ctx.isEmpty ? "Conhecimento geral sobre Swift." : ctx)
-                \(fewShot)
+                    let prompt = """
+                    Tópico: \(topic)
+                    Contexto da documentação: \(ctx.isEmpty ? "Conhecimento geral sobre Swift." : ctx)
+                    \(fewShot)
 
-                Gere exatamente \(count) perguntas de quiz NOVAS de dificuldade \(difficultyLabel).
-                """
+                    Gere exatamente \(count) perguntas de quiz NOVAS de dificuldade \(difficultyLabel).
+                    """
 
-                // ~220 tokens por pergunta (enunciado + 4 alternativas +
-                // explicação, em português). O teto fixo de 600 era a causa dos
-                // decodingFailure: 5-6 perguntas não cabiam e a resposta chegava
-                // truncada, quebrando a decodificação do schema.
-                let options = GenerationOptions(maximumResponseTokens: 220 * count + 150)
-                let response = try await session.respond(to: prompt, generating: QuizQuestionBatch.self, options: options)
-                return response.content.questions
+                    // ~220 tokens por pergunta (enunciado + 4 alternativas +
+                    // explicação, em português). O teto fixo de 600 era a causa dos
+                    // decodingFailure: 5-6 perguntas não cabiam e a resposta chegava
+                    // truncada, quebrando a decodificação do schema.
+                    let options = GenerationOptions(maximumResponseTokens: 220 * count + 150)
+                    let response = try await session.respond(to: prompt, generating: QuizQuestionBatch.self, options: options)
+                    return response.content.questions
+                }
             }
         }
     }
@@ -686,9 +744,11 @@ final class StudyGenerator {
         // única chamada FM em voo por vez.
         for attempt in 1...3 {
             do {
-                let formatted = try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-                    let session = LanguageModelSession(model: model, instructions: formatterInstructions)
-                    return try await session.respond(to: formatterPrompt, generating: QuizQuestion.self)
+                let formatted = try await Self.timed("formatação de pergunta difícil (FM)", engine: .foundationModels, taskType: .hardQuizFormat, topic: topic) {
+                    try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                        let session = LanguageModelSession(model: model, instructions: formatterInstructions)
+                        return try await session.respond(to: formatterPrompt, generating: QuizQuestion.self)
+                    }
                 }
                 return formatted.content
             } catch {
@@ -731,7 +791,9 @@ final class StudyGenerator {
                 try await MLXService.shared.generateQuestionDrafts(
                     systemPrompt: "Você é um especialista em Swift. Gere trechos de código e perguntas de análise sobre seus comportamentos, em texto puro.",
                     promptContext: mlxPrompt,
-                    count: count
+                    count: count,
+                    topic: topic,
+                    taskType: .codeAnalysisDraft
                 )
             }
 
@@ -744,7 +806,9 @@ final class StudyGenerator {
                 let single = try await GenerationOrchestrator.shared.schedule(engine: .mlx, priority: priority) {
                     try await MLXService.shared.generateQuestionDraft(
                         systemPrompt: "Você é um especialista em Swift. Gere um trecho de código e uma pergunta de análise sobre seu comportamento, em texto puro.",
-                        promptContext: mlxPrompt.replacingOccurrences(of: "Escreva \(count) trechos de código Swift limpos", with: "Escreva UM trecho de código Swift limpo")
+                        promptContext: mlxPrompt.replacingOccurrences(of: "Escreva \(count) trechos de código Swift limpos", with: "Escreva UM trecho de código Swift limpo"),
+                        topic: topic,
+                        taskType: .codeAnalysisDraft
                     )
                 }
                 results.append(await formatCodeAnalysisQuestion(draft: single, topic: topic, context: ragContext, priority: priority))
@@ -809,7 +873,7 @@ final class StudyGenerator {
             return fallbackQuestion
         }
 
-        let critique = (try? await critiqueCodeDraft(draft: cleanDraft, topic: topic, context: context, priority: priority)) ?? "OK - sem erros"
+        let critique = (try? await critiqueCodeDraft(draft: cleanDraft, topic: topic, context: context, priority: priority, taskType: .codeAnalysisCritique)) ?? "OK - sem erros"
         print("🔵 [análise de código] crítica técnica: \(critique.prefix(200))\(critique.count > 200 ? "…" : "")")
 
         let formatterInstructions = """
@@ -858,16 +922,20 @@ final class StudyGenerator {
         for attempt in 1...3 {
             do {
                 let options = GenerationOptions(maximumResponseTokens: 900)
-                let formatted = try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-                    let session = LanguageModelSession(model: model, instructions: formatterInstructions)
-                    return try await session.respond(to: formatterPrompt, generating: CodeAnalysisQuestion.self, options: options)
+                let formatted = try await Self.timed("formatação de análise de código (FM)", engine: .foundationModels, taskType: .codeAnalysisFormat, topic: topic, ragContextChars: context.count) {
+                    try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                        let session = LanguageModelSession(model: model, instructions: formatterInstructions)
+                        return try await session.respond(to: formatterPrompt, generating: CodeAnalysisQuestion.self, options: options)
+                    }
                 }
                 if Self.looksTruncated(formatted.content.codeSnippet) {
                     print("⚠️ [análise de código] codeSnippet parece truncado — retry pedindo versão mais curta.")
                     let retrySession = LanguageModelSession(model: model, instructions: formatterInstructions)
                     let retryPrompt = formatterPrompt + "\n\nIMPORTANTE: mantenha o codeSnippet com NO MÁXIMO 8 linhas de código."
-                    let retry = try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-                        try await retrySession.respond(to: retryPrompt, generating: CodeAnalysisQuestion.self, options: options)
+                    let retry = try await Self.timed("formatação de análise de código retry (FM)", engine: .foundationModels, taskType: .codeAnalysisFormat, topic: topic, ragContextChars: context.count) {
+                        try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                            try await retrySession.respond(to: retryPrompt, generating: CodeAnalysisQuestion.self, options: options)
+                        }
                     }
                     if !Self.looksTruncated(retry.content.codeSnippet) {
                         return retry.content
@@ -897,20 +965,22 @@ final class StudyGenerator {
         Dê um feedback específico e construtivo baseado apenas no desempenho relatado.
         """
 
-        return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
-            try await self.withDiagnostics(step: "feedback da sessão", context: "") { _ in
-                let session = LanguageModelSession(model: model, instructions: instructions)
+        return try await Self.timed("feedback da sessão (FM)", engine: .foundationModels, taskType: .feedback, topic: topic) {
+            try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                try await self.withDiagnostics(step: "feedback da sessão", context: "") { _ in
+                    let session = LanguageModelSession(model: model, instructions: instructions)
 
-                let topicsList = validTopics.isEmpty ? "" : validTopics.joined(separator: ", ")
-                let prompt = """
-                Tópico estudado: \(topic)
-                Desempenho do usuário nesta sessão: \(performanceSummary)
-                \(topicsList.isEmpty ? "" : "Para recommendedNextTopic, recomende OBRIGATORIAMENTE um destes tópicos (copie o nome exatamente como está aqui), o que fizer mais sentido dado os erros cometidos: \(topicsList)")
-                """
+                    let topicsList = validTopics.isEmpty ? "" : validTopics.joined(separator: ", ")
+                    let prompt = """
+                    Tópico estudado: \(topic)
+                    Desempenho do usuário nesta sessão: \(performanceSummary)
+                    \(topicsList.isEmpty ? "" : "Para recommendedNextTopic, recomende OBRIGATORIAMENTE um destes tópicos (copie o nome exatamente como está aqui), o que fizer mais sentido dado os erros cometidos: \(topicsList)")
+                    """
 
-                let options = GenerationOptions(maximumResponseTokens: 600)
-                let response = try await session.respond(to: prompt, generating: StudyFeedback.self, options: options)
-                return response.content
+                    let options = GenerationOptions(maximumResponseTokens: 600)
+                    let response = try await session.respond(to: prompt, generating: StudyFeedback.self, options: options)
+                    return response.content
+                }
             }
         }
     }

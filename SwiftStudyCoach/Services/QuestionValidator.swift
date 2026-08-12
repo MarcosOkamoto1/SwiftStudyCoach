@@ -133,11 +133,20 @@ enum QuestionValidator {
     /// tenta UMA regeneração via `regenerateOne`; se a regeneração também
     /// falhar (erro ou continua inválida), o item é descartado — nunca
     /// entra no pool. Pode devolver menos itens que `raw.count`.
+    ///
+    /// `topic`/`taskType` (PLAN_00) são só para instrumentação: ao final do
+    /// lote, registra QUANTAS regenerações (`retryCount`) foram disparadas
+    /// nesta chamada — pura leitura/contagem, a lógica de validação e
+    /// regeneração em si não muda em nada.
     static func processQuizBatch(
         _ raw: [QuizQuestion],
+        topic: String = "",
+        taskType: GenerationMetrics.TaskType? = nil,
         regenerateOne: () async throws -> QuizQuestion?
     ) async -> [QuizQuestion] {
         var result: [QuizQuestion] = []
+        var retryCount = 0
+        let start = Date()
         for item in raw {
             let cleaned = sanitize(item)
             if isValid(cleaned) {
@@ -145,6 +154,7 @@ enum QuestionValidator {
                 continue
             }
             print("⚠️ QuestionValidator: questão de quiz inválida, tentando 1 regeneração...")
+            retryCount += 1
             if let retry = try? await regenerateOne() {
                 let retryCleaned = sanitize(retry)
                 if isValid(retryCleaned) {
@@ -154,15 +164,35 @@ enum QuestionValidator {
             }
             print("❌ QuestionValidator: questão de quiz descartada após regeneração falhar.")
         }
+        if let taskType {
+            let elapsedMs = Date().timeIntervalSince(start) * 1000
+            Task {
+                await GenerationMetricsStore.shared.record(
+                    GenerationMetrics(
+                        engine: .foundationModels,
+                        taskType: taskType,
+                        topic: topic,
+                        modelID: "system",
+                        totalTimeMs: elapsedMs,
+                        retryCount: retryCount,
+                        batchSize: raw.count
+                    )
+                )
+            }
+        }
         return result
     }
 
     /// Mesma política de `processQuizBatch`, pra CodeAnalysisQuestion.
     static func processCodeAnalysisBatch(
         _ raw: [CodeAnalysisQuestion],
+        topic: String = "",
+        taskType: GenerationMetrics.TaskType? = nil,
         regenerateOne: () async throws -> CodeAnalysisQuestion?
     ) async -> [CodeAnalysisQuestion] {
         var result: [CodeAnalysisQuestion] = []
+        var retryCount = 0
+        let start = Date()
         for item in raw {
             let cleaned = sanitize(item)
             if isValid(cleaned) {
@@ -170,6 +200,7 @@ enum QuestionValidator {
                 continue
             }
             print("⚠️ QuestionValidator: questão de análise de código inválida, tentando 1 regeneração...")
+            retryCount += 1
             if let retry = try? await regenerateOne() {
                 let retryCleaned = sanitize(retry)
                 if isValid(retryCleaned) {
@@ -178,6 +209,22 @@ enum QuestionValidator {
                 }
             }
             print("❌ QuestionValidator: questão de análise de código descartada após regeneração falhar.")
+        }
+        if let taskType {
+            let elapsedMs = Date().timeIntervalSince(start) * 1000
+            Task {
+                await GenerationMetricsStore.shared.record(
+                    GenerationMetrics(
+                        engine: .mlx,
+                        taskType: taskType,
+                        topic: topic,
+                        modelID: MLXService.modelID,
+                        totalTimeMs: elapsedMs,
+                        retryCount: retryCount,
+                        batchSize: raw.count
+                    )
+                )
+            }
         }
         return result
     }
