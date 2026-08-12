@@ -10,6 +10,7 @@
 //  atrás de um menu de debug.
 //
 
+#if DEBUG
 import SwiftUI
 
 struct RAGTestView: View {
@@ -120,3 +121,4 @@ struct RAGTestView: View {
 #Preview {
     RAGTestView()
 }
+#endif // DEBUG

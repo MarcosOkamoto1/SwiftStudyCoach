@@ -12,6 +12,7 @@
 //  PARTE-5-validacao-fluxo-completo.md. Pode apagar depois de validar.
 //
 
+#if DEBUG
 import SwiftUI
 import SwiftData
 
@@ -679,3 +680,4 @@ struct TopicRepositoryTestView: View {
             PersistedCodeAnalysisQuestion.self
         ])
 }
+#endif // DEBUG

@@ -2,9 +2,9 @@
 //  RootTabView.swift
 //  SwiftStudyCoach
 //
-//  Raiz temporária de navegação enquanto o app é só telas de teste/debug.
-//  Junta as 3 telas existentes numa TabView pra não precisar comentar
-//  código pra trocar entre elas.
+//  Raiz de navegação. Em Release só a aba "Estudar" aparece; as telas
+//  de debug (Resumo, Fluxo completo, RAG) ficam atrás de #if DEBUG
+//  (PLAN_17) para manter a navegação de produção limpa.
 //
 
 import SwiftUI
@@ -12,6 +12,21 @@ import SwiftData
 
 struct RootTabView: View {
     var body: some View {
+        content
+            .tint(DS.Colors.violet)
+        // Plano V3 4.3: no launch, se o modelo MLX já estiver em cache
+        // local (checagem só com FileManager, sem rede), carrega ele em
+        // background — assim a 1ª pergunta difícil não paga o custo de
+        // carga. Sem cache, não faz nada (sem download não-solicitado).
+        .task { MLXService.shared.prewarmIfCached() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        // PLAN_17: telas de debug só em builds de desenvolvimento.
+        // Em Release não há TabView — StudyHomeView vira a raiz direta,
+        // sem barra de abas com item único.
+        #if DEBUG
         TabView {
             StudyHomeView()
                 .tabItem { Label("Estudar", systemImage: "book.pages") }
@@ -25,12 +40,9 @@ struct RootTabView: View {
             RAGTestView()
                 .tabItem { Label("RAG", systemImage: "magnifyingglass") }
         }
-        .tint(DS.Colors.violet)
-        // Plano V3 4.3: no launch, se o modelo MLX já estiver em cache
-        // local (checagem só com FileManager, sem rede), carrega ele em
-        // background — assim a 1ª pergunta difícil não paga o custo de
-        // carga. Sem cache, não faz nada (sem download não-solicitado).
-        .task { MLXService.shared.prewarmIfCached() }
+        #else
+        StudyHomeView()
+        #endif
     }
 }
 

@@ -9,6 +9,7 @@
 //  - o quiz é sorteado do pool já existente, sem gerar nada na hora
 //
 
+#if DEBUG
 import SwiftUI
 import SwiftData
 
@@ -161,3 +162,4 @@ struct ContentView: View {
             PersistedCodeAnalysisQuestion.self
         ], inMemory: true)
 }
+#endif // DEBUG

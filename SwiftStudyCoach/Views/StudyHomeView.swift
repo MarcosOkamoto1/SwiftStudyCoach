@@ -16,6 +16,7 @@ import SwiftUI
 import SwiftData
 
 struct StudyHomeView: View {
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \StudyTopic.createdAt, order: .reverse) private var topics: [StudyTopic]
 
     @State private var navigateTo: String?
@@ -57,6 +58,23 @@ struct StudyHomeView: View {
                                 }
                             }
                         }
+
+                        // Botão de debug: marca todos os tópicos cacheados com
+                        // uma versão de dataset inválida, forçando regeração na
+                        // próxima visita (valida o versionamento sem recompilar).
+                        #if DEBUG
+                        if !topics.isEmpty {
+                            Button {
+                                invalidateDataset()
+                            } label: {
+                                Label("Invalidar dataset (debug)", systemImage: "arrow.clockwise.circle")
+                                    .font(DS.Fonts.mono(11))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(DS.Colors.orchid)
+                            .padding(.top, 12)
+                        }
+                        #endif
                     }
                     .padding(24)
                 }
@@ -66,6 +84,15 @@ struct StudyHomeView: View {
             }
         }
     }
+
+    #if DEBUG
+    private func invalidateDataset() {
+        for topic in topics {
+            topic.sourceDatasetVersion = "debug-invalidated"
+        }
+        try? modelContext.save()
+    }
+    #endif
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text)

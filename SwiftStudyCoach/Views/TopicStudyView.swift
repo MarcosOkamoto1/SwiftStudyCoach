@@ -18,7 +18,11 @@ import SwiftUI
 import SwiftData
 
 private enum ActiveSheet: Identifiable {
-    case quiz, codeAnalysis, result
+    // O batch do quiz viaja DENTRO do item do sheet: setar `quizBatch` e
+    // `activeSheet` como @States separados no mesmo ciclo fazia o sheet ser
+    // construído antes do batch propagar — quiz abria em branco no 1º toque.
+    case quiz([PersistedQuizQuestion])
+    case codeAnalysis, result
     var id: Int {
         switch self {
         case .quiz: return 1
@@ -42,7 +46,6 @@ struct TopicStudyView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
 
-    @State private var quizBatch: [PersistedQuizQuestion] = []
     @State private var quizAnswers: [AnsweredQuestion] = []
     @State private var codeAnswers: [AnsweredQuestion] = []
     @State private var activeSheet: ActiveSheet?
@@ -353,8 +356,7 @@ struct TopicStudyView: View {
                     color: DS.Colors.cyan
                 ) {
                     guard let repository else { return }
-                    quizBatch = repository.sampleQuiz(from: topic)
-                    activeSheet = .quiz
+                    activeSheet = .quiz(repository.sampleQuiz(from: topic))
                 }
                 .disabled(topic.quizPool.isEmpty)
                 .opacity(topic.quizPool.isEmpty ? 0.4 : 1)
@@ -418,8 +420,8 @@ struct TopicStudyView: View {
     @ViewBuilder
     private func sheetContent(_ sheet: ActiveSheet) -> some View {
         switch sheet {
-        case .quiz:
-            QuizView(topicName: topicName, questions: quizBatch) { answers in
+        case .quiz(let questions):
+            QuizView(topicName: topicName, questions: questions) { answers in
                 quizAnswers = answers
                 replenishAfterSession()
             }
