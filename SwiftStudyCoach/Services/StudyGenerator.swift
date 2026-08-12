@@ -128,26 +128,35 @@ final class StudyGenerator {
 
             let ragContext = await ensureContext(context, topic: topic)
 
-            // Alterado para pedir JSON assim como no quiz de código
             let mlxPrompt = """
-            Você é um especialista em Swift. Crie UMA pergunta técnica de múltipla escolha de nível AVANÇADO sobre '\(topic)'.
+            [SYSTEM]
+            Você é um assistente técnico especialista em Swift.
+            Responda EXCLUSIVAMENTE em formato JSON puro.
+            NÃO inclua marcações de código markdown como ```json.
+            NÃO escreva introduções ou explicações fora do objeto JSON.
+            Comece sua resposta estritamente com '{' e termine com '}'.
+
+            [TAREFA]
+            Crie UMA pergunta técnica de múltipla escolha de nível AVANÇADO sobre '\(topic)'.
 
             [Contexto RAG]:
             \(ragContext.isEmpty ? "Conhecimento geral sobre Swift." : ragContext)
 
-            [Instruções de Saída]:
-            Retorne APENAS um objeto JSON válido (sem textos em volta) exatamente neste formato:
+            [INSTRUÇÃO PARA A EXPLICAÇÃO]:
+            No campo 'explanation', explique detalhadamente por que a alternativa 'correctOptionIndex' é a correta e por que os conceitos envolvidos nas outras alternativas estão incorretos, servindo como feedback de estudo para o usuário.
+
+            [FORMATO ESPERADO]:
             {
-              "question": "Apenas o enunciado da pergunta sem listar alternativas aqui",
-              "options": ["Opção A", "Opção B", "Opção C", "Opção D"],
+              "question": "Enunciado direto da pergunta sem listar as alternativas aqui",
+              "options": ["Opção correta", "Opção incorreta 1", "Opção incorreta 2", "Opção incorreta 3"],
               "correctOptionIndex": 0,
-              "explanation": "Explicação técnica detalhada da resposta."
+              "explanation": "Explicação técnica e didática detalhando por que a opção 0 é a correta e o erro conceitual das outras."
             }
             """
             
             let rawDraft = try await MLXService.shared.generateQuestionDraft(promptContext: mlxPrompt)
             
-            
+            // Sanitização e extração do bloco JSON
             var cleanJSON = rawDraft
                 .replacingOccurrences(of: "```json", with: "")
                 .replacingOccurrences(of: "```swift", with: "")
@@ -176,15 +185,15 @@ final class StudyGenerator {
             } else {
                 let fallbackQuestion = QuizQuestion(
                     difficulty: difficulty,
-                    question: "Qual é o comportamento esperado ao trabalhar com concorrência avançada e isolamento de estado em \(topic)?",
+                    question: "Ao trabalhar com conceitos avançados de Concorrência e isolamento em \(topic), qual é a regra principal para evitar condições de corrida (data races)?",
                     options: [
-                        "Executa com sucesso garantindo o isolamento de estado do ator",
-                        "Gera um erro de compilação por violação de regras de Concurrency",
-                        "Provoca uma condição de corrida (data race) em tempo de execução",
-                        "Causa um vazamento de memória devido a referência circular"
+                        "Garantir que o acesso ao estado mutável seja isolado por um Actor ou MainActor",
+                        "Utilizar variáveis globais do tipo 'var' sem controle de sincronização",
+                        "Forçar a execução síncrona de todas as tasks assíncronas",
+                        "Desativar as verificações de Strict Concurrency no compilador"
                     ],
                     correctOptionIndex: 0,
-                    explanation: "Pergunta avançada sobre isolamento de estado em Swift."
+                    explanation: "A alternativa 'A' está correta porque em Swift Concurrency o isolamento de estado mutável através de Actors impede acessos concorrentes simultâneos, evitando condições de corrida (data races) em tempo de execução."
                 )
                 return [fallbackQuestion]
             }
