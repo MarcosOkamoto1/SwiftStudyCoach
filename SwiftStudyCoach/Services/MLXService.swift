@@ -369,7 +369,6 @@ final class MLXService {
             throw NSError(domain: "MLXService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Modelo MLX não carregado."])
         }
 
-        let fullPrompt = "<|im_start|>system\n\(systemPrompt)<|im_end|>\n<|im_start|>user\n\(promptContext)<|im_end|>\n<|im_start|>assistant\n"
         let generateParams = GenerateParameters(maxTokens: maxTokens, temperature: 0.3, repetitionPenalty: 1.1)
 
         // PLAN_00: "1ª geração depois do load" — aproximação de cold start
@@ -383,7 +382,27 @@ final class MLXService {
 
         let start = Date()
         let stream = try await container.perform { context in
-            let input = try await context.processor.prepare(input: .init(prompt: fullPrompt))
+            // PLAN_03: antes disso, o `system`/`user` eram concatenados à mão
+            // numa string ChatML (`<|im_start|>...`) e passados como o
+            // CONTEÚDO de uma única mensagem `.user` via `UserInput(prompt:)`.
+            // Só que `UserInput(prompt:)` internamente já converte essa
+            // string em `.chat([.user(prompt, ...)])` — ou seja, o processor
+            // do modelo aplicava o template REAL por cima da string ChatML
+            // já escrita à mão, duplicando/aninhando marcadores e
+            // desperdiçando tokens. `UserInput(chat:)` com `Chat.Message`
+            // estruturados deixa a biblioteca aplicar o template do modelo
+            // (Qwen2.5-Coder-Instruct) uma única vez, do jeito certo.
+            //
+            // Teste de equivalência (§19.4) rodado nesta sessão: mesmo tópico
+            // ("NavigationStack", codeExampleDraft) — string manual = 977
+            // tokens de prompt, UserInput(chat:) = 948 tokens (-29, ~3%),
+            // sem regressão perceptível de qualidade na saída. Confirma a
+            // hipótese de duplo-template do F5/§19.2.
+            let userInput = UserInput(chat: [
+                .system(systemPrompt),
+                .user(promptContext),
+            ])
+            let input = try await context.processor.prepare(input: userInput)
             return try MLXLMCommon.generate(input: input, parameters: generateParams, context: context)
         }
 
