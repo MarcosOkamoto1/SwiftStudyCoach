@@ -3,7 +3,7 @@
 //  SwiftStudyCoach
 //
 //  Parte 7 — ponto de entrada pras telas visuais reais: digitar/escolher
-//  um tópico e abrir o TopicStudyView (artigo + flashcards/quiz/análise).
+//  um tópico e abrir o TopicStudyView (artigo + quiz/análise).
 //
 
 import SwiftUI
@@ -33,22 +33,7 @@ struct StudyHomeView: View {
                         }
                         .padding(.top, 20)
 
-                        HStack {
-                            TextField("", text: $topicName, prompt: Text("Ex: Guard, Optionals, Actors").foregroundColor(DS.Colors.mistDim))
-                                .font(DS.Fonts.body(16))
-                                .foregroundStyle(DS.Colors.foam)
-                                .padding(14)
-                                .background(RoundedRectangle(cornerRadius: 12).fill(DS.Colors.slate))
-                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.Colors.hairline, lineWidth: 1))
-                        }
-
-                        Button("Estudar") {
-                            let trimmed = topicName.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !trimmed.isEmpty else { return }
-                            navigateTo = trimmed
-                        }
-                        .buttonStyle(DSButtonStyle(accent: DS.Colors.violet, filled: true))
-                        .disabled(topicName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        
 
                         if !topics.isEmpty {
                             sectionLabel("JÁ ESTUDADOS")
@@ -111,7 +96,6 @@ struct StudyHomeView: View {
     StudyHomeView()
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ])

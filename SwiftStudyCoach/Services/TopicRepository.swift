@@ -6,7 +6,7 @@
 //  Responsável por: (1) servir um StudyTopic do cache quando possível, sem
 //  nenhuma chamada nova ao Foundation Models; (2) gerar e persistir tudo na
 //  primeira visita a um tópico; (3) sortear o quiz a partir do pool já
-//  existente; (4) fazer crescer o pool até 40 itens em background, sem
+//  existente; (4) fazer crescer o pool até 24 itens em background, sem
 //  travar a UI e sem duplicar geração.
 //
 
@@ -20,10 +20,10 @@ final class TopicRepository {
     private let modelContext: ModelContext
     private let generator: StudyGenerator
 
-    // Tamanho alvo do pool de quiz por dificuldade (~40 no total).
-    private let targetEasy = 14
-    private let targetMedium = 13
-    private let targetHard = 13
+    // Tamanho alvo do pool de quiz por dificuldade (~24 no total).
+    private let targetEasy = 8
+    private let targetMedium = 8
+    private let targetHard = 8
 
     init(modelContext: ModelContext, generator: StudyGenerator) {
         self.modelContext = modelContext
@@ -33,7 +33,7 @@ final class TopicRepository {
     // MARK: - API pública
 
     /// Busca um StudyTopic já persistido (mesma versão de dataset) ou gera
-    /// tudo do zero (resumo, flashcards, lote inicial de quiz/análise de
+    /// tudo do zero (resumo, lote inicial de quiz/análise de
     /// código) e persiste. Da segunda visita em diante, deve ser instantâneo.
     func fetchOrCreate(topic: String) async throws -> StudyTopic {
         if let existing = try fetchExisting(topic: topic) {
@@ -89,18 +89,17 @@ final class TopicRepository {
         print("🔵 generateAndPersist CHAMADO para '\(topic)' — isso deveria acontecer só na 1ª visita (ou após trocar DatasetVersion.current).")
 
         // Contexto de documentação recuperado uma única vez e reaproveitado
-        // em todas as chamadas de geração abaixo (resumo, flashcards, lotes
+        // em todas as chamadas de geração abaixo (resumo, lotes
         // de quiz e de análise de código).
         let context = await generator.retrieveContext(for: topic)
 
         // Gera tudo primeiro em variáveis locais — só insere/salva no
-        // SwiftData depois que resumo, flashcards, quiz e análise de código
+        // SwiftData depois que resumo, quiz e análise de código
         // tiverem sido gerados com sucesso. Se qualquer chamada falhar, o
         // throws propaga antes de tocar no modelContext, e nada fica
         // persistido pela metade (o que deixaria o cache "quebrado" HIT
         // permanentemente com quizPool vazio).
         let summary = try await generator.generateSummary(topic: topic, context: context)
-        let flashcards = try await generator.generateFlashcards(topic: topic, context: context)
 
         // Lote inicial síncrono (usuário espera): 5 fácil + 6 média + 4
         // difícil = 15, cada dificuldade numa chamada separada — nunca uma
@@ -117,7 +116,6 @@ final class TopicRepository {
             keyPoints: summary.keyPoints,
             codeExample: summary.codeExample
         )
-        studyTopic.flashcards = flashcards.map { PersistedFlashcard(from: $0) }
         studyTopic.quizPool = (easy + medium + hard).map { PersistedQuizQuestion(from: $0) }
         studyTopic.codeAnalysisPool = codeAnalysis.map { PersistedCodeAnalysisQuestion(from: $0) }
 

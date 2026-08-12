@@ -3,7 +3,7 @@
 //  SwiftStudyCoach
 //
 //  Entidades SwiftData persistidas. Os @Generable em StudyModels.swift
-//  (Flashcard, QuizQuestion, CodeAnalysisQuestion) são os DTOs de saída
+//  (QuizQuestion, CodeAnalysisQuestion) são os DTOs de saída
 //  do Foundation Models — as classes @Model abaixo é que ficam salvas em
 //  disco, com um mapeamento simples campo a campo entre os dois.
 //
@@ -15,9 +15,6 @@ import SwiftData
 /// Trocar esse valor invalida automaticamente todo o cache existente —
 /// ver `TopicRepository.fetchOrCreate`.
 enum DatasetVersion {
-    // `var` (não `let`) de propósito: permite trocar em runtime a partir da
-    // tela de teste (TopicRepositoryTestView) para validar a invalidação de
-    // cache sem precisar recompilar o app.
     static var current = "apple-docs-v1"
 }
 
@@ -30,9 +27,6 @@ final class StudyTopic {
     var createdAt: Date
     var sourceDatasetVersion: String   // invalida cache antigo quando muda
     var isGeneratingPool: Bool = false // evita disparar geração em background em duplicidade
-
-    @Relationship(deleteRule: .cascade)
-    var flashcards: [PersistedFlashcard]
 
     @Relationship(deleteRule: .cascade)
     var quizPool: [PersistedQuizQuestion]
@@ -48,24 +42,8 @@ final class StudyTopic {
         self.createdAt = .now
         self.sourceDatasetVersion = DatasetVersion.current
         self.isGeneratingPool = false
-        self.flashcards = []
         self.quizPool = []
         self.codeAnalysisPool = []
-    }
-}
-
-@Model
-final class PersistedFlashcard {
-    var question: String
-    var answer: String
-
-    init(question: String, answer: String) {
-        self.question = question
-        self.answer = answer
-    }
-
-    convenience init(from dto: Flashcard) {
-        self.init(question: dto.question, answer: dto.answer)
     }
 }
 

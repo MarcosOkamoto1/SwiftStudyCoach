@@ -27,20 +27,6 @@ struct TopicSummary {
 }
 
 @Generable
-struct Flashcard {
-    @Guide(description: "Pergunta curta e objetiva sobre um conceito do tópico")
-    var question: String
-
-    @Guide(description: "Resposta objetiva e direta à pergunta, 1-2 frases")
-    var answer: String
-}
-
-@Generable
-struct FlashcardBatch {
-    var flashcards: [Flashcard]
-}
-
-@Generable
 enum Difficulty: String, CaseIterable {
     case easy
     case medium
