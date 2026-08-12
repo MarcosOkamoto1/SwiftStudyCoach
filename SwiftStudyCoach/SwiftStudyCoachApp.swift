@@ -14,7 +14,6 @@ struct SwiftStudyCoachApp: App {
         }
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ])

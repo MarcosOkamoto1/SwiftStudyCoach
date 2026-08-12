@@ -97,6 +97,33 @@ struct PillView: View {
     }
 }
 
+// MARK: - Barra de progresso fina
+
+/// Barra de progresso fina, no estilo `.progress-track` / `.progress-fill`
+/// do protótipo HTML — usada nas telas de Quiz e Análise de Código.
+struct ProgressBar: View {
+    let progress: Double // 0...1
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Rectangle().fill(DS.Colors.hairlineSoft)
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [DS.Colors.violetDim, DS.Colors.violet],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(4, proxy.size.width * min(1, max(0, progress))))
+                    .animation(.easeOut(duration: 0.2), value: progress)
+            }
+        }
+        .frame(height: 2)
+    }
+}
+
 // MARK: - Botão base do app (usa a paleta escura)
 
 struct DSButtonStyle: ButtonStyle {

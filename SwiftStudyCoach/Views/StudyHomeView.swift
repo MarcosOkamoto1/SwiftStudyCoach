@@ -3,7 +3,7 @@
 //  SwiftStudyCoach
 //
 //  Parte 7 — ponto de entrada pras telas visuais reais: digitar/escolher
-//  um tópico e abrir o TopicStudyView (artigo + flashcards/quiz/análise).
+//  um tópico e abrir o TopicStudyView (artigo + quiz/análise).
 //
 
 import SwiftUI
@@ -96,7 +96,6 @@ struct StudyHomeView: View {
     StudyHomeView()
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ])

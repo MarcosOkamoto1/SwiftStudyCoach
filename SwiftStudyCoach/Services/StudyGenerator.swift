@@ -27,9 +27,19 @@ final class StudyGenerator {
 
     /// Recupera o contexto de documentação para um tópico uma única vez,
     /// para ser reutilizado em múltiplas chamadas de geração (resumo,
-    /// flashcards, lotes de quiz, análise de código) sem repetir a busca RAG.
+    /// lotes de quiz, análise de código) sem repetir a busca RAG.
     func retrieveContext(for topic: String, topK: Int = 3) async -> String {
         (try? await documentIndex.retrieveContext(for: topic, topK: topK)) ?? ""
+    }
+
+    /// Garante que toda chamada de geração (FM e MLX) tenha contexto RAG
+    /// quando ele existir: se o `context` já recuperado por
+    /// `retrieveContext` vier vazio (ex.: chamador não buscou ainda, ou
+    /// buscou antes do índice terminar), tenta buscar de novo aqui mesmo,
+    /// na hora, em vez de silenciosamente cair pra "conhecimento geral".
+    private func ensureContext(_ context: String, topic: String) async -> String {
+        guard context.isEmpty else { return context }
+        return (try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? ""
     }
 
     /// Verifica se o modelo de sistema está disponível neste device.
@@ -66,8 +76,10 @@ final class StudyGenerator {
 
         let session = LanguageModelSession(model: model, instructions: instructions)
 
+        let ragContext = await ensureContext(context, topic: topic)
+
         let prompt: String
-        if context.isEmpty {
+        if ragContext.isEmpty {
             prompt = """
             Tópico: \(topic)
 
@@ -79,7 +91,7 @@ final class StudyGenerator {
             Tópico: \(topic)
 
             Contexto da documentação oficial (use isso como base principal):
-            \(context)
+            \(ragContext)
 
             Gere um resumo estruturado desse tópico de Swift para um desenvolvedor
             iniciante/intermediário, incluindo pontos-chave e um exemplo de código.
@@ -92,39 +104,6 @@ final class StudyGenerator {
                 generating: TopicSummary.self
             )
             return response.content
-        } catch {
-            throw StudyGeneratorError.generationFailed(error)
-        }
-    }
-
-    /// Gera flashcards para um tópico.
-    func generateFlashcards(topic: String, context: String, count: Int = 8) async throws -> [Flashcard] {
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else {
-            throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
-        }
-
-        let instructions = """
-        Você é um assistente educacional especializado em Swift e nos frameworks da Apple.
-        Responda sempre em português.
-        Baseie-se PRINCIPALMENTE no contexto de documentação fornecido abaixo.
-        Gere flashcards com pergunta curta de um lado e resposta objetiva do outro.
-        """
-
-        let session = LanguageModelSession(model: model, instructions: instructions)
-
-        let prompt = """
-        Tópico: \(topic)
-
-        Contexto da documentação (use como base principal):
-        \(context.isEmpty ? "Nenhum contexto adicional disponível — use conhecimento geral de Swift, com cautela." : context)
-
-        Gere exatamente \(count) flashcards distintos sobre o tópico acima.
-        """
-
-        do {
-            let response = try await session.respond(to: prompt, generating: FlashcardBatch.self)
-            return response.content.flashcards
         } catch {
             throw StudyGeneratorError.generationFailed(error)
         }
@@ -146,9 +125,9 @@ final class StudyGenerator {
         // SE FOR DIFÍCIL: Processa via MLX Local com formato JSON
         if difficulty == .hard {
             try await MLXService.shared.loadModel()
-            
-            let ragContext = context.isEmpty ? ((try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? "") : context
-            
+
+            let ragContext = await ensureContext(context, topic: topic)
+
             // Alterado para pedir JSON assim como no quiz de código
             let mlxPrompt = """
             Você é um especialista em Swift. Crie UMA pergunta técnica de múltipla escolha de nível AVANÇADO sobre '\(topic)'.
@@ -226,6 +205,8 @@ final class StudyGenerator {
 
         let session = LanguageModelSession(model: model, instructions: instructions)
 
+        let ragContext = await ensureContext(context, topic: topic)
+
         let fewShot = """
         Exemplo de pergunta FÁCIL:
         Pergunta: "O que a palavra-chave `if let` faz ao trabalhar com um Optional?"
@@ -237,7 +218,7 @@ final class StudyGenerator {
 
         let prompt = """
         Tópico: \(topic)
-        Contexto da documentação: \(context.isEmpty ? "Conhecimento geral sobre Swift." : context)
+        Contexto da documentação: \(ragContext.isEmpty ? "Conhecimento geral sobre Swift." : ragContext)
         \(fewShot)
 
         Gere exatamente \(count) perguntas de quiz NOVAS de dificuldade \(difficultyLabel).
@@ -256,8 +237,8 @@ final class StudyGenerator {
     /// Gera um lote de perguntas de análise de código (100% dinâmico via MLX + JSON structured output)
     func generateCodeAnalysisBatch(topic: String, context: String, count: Int = 5) async throws -> [CodeAnalysisQuestion] {
         try await MLXService.shared.loadModel()
-        
-        let ragContext = context.isEmpty ? ((try? await documentIndex.retrieveContext(for: topic, topK: 3)) ?? "") : context
+
+        let ragContext = await ensureContext(context, topic: topic)
 
         let prompt = """
         Você é um especialista em Swift. Crie UMA pergunta técnica de análise de código sobre '\(topic)'.

@@ -70,11 +70,21 @@ final class DocumentIndex {
     /// isso também deixa o caminho pronto para o modo "tópico livre" (P2),
     /// onde a busca semântica volta a ser o caminho principal.
     func retrieveContext(for query: String, topK: Int = 3) async throws -> String {
-        let normalizedQuery = normalize(query)
+        let queryWords = normalizedWords(query)
 
         let directMatches = chunks.filter { chunk in
-            let normalizedTopic = normalize(chunk.topic)
-            return normalizedTopic == normalizedQuery || normalizedTopic.contains(normalizedQuery) || normalizedQuery.contains(normalizedTopic)
+            let topicWords = normalizedWords(chunk.topic)
+            guard !topicWords.isEmpty else { return false }
+            // Match por FRASE/PALAVRA inteira, nunca por substring "colada".
+            // Antes disso comparava strings com os espaços removidos usando
+            // .contains bidirecional — isso fazia um tópico curto como
+            // "Guard" bater erroneamente com qualquer texto que contivesse
+            // a sequência de letras "guard" no meio de outra palavra (ex:
+            // "guardado", "resguardar", "vanguard"), trazendo o contexto de
+            // RAG errado pro tópico sendo estudado.
+            if topicWords == queryWords { return true }
+            return containsWordSequence(topicWords, in: queryWords)
+                || containsWordSequence(queryWords, in: topicWords)
         }
 
         if !directMatches.isEmpty {
@@ -91,12 +101,29 @@ final class DocumentIndex {
             .joined(separator: "\n\n")
     }
 
-    /// Normaliza removendo acento, case e espaços, para que variações de
-    /// digitação (ex: "navigation stack" vs "NavigationStack") batam no
-    /// mesmo tópico indexado.
-    private func normalize(_ s: String) -> String {
+    /// Normaliza removendo acento e case, e quebra em palavras (preservando
+    /// os limites entre elas) — para que variações de digitação (ex:
+    /// "navigation stack" vs "NavigationStack") batam no mesmo tópico
+    /// indexado sem permitir colisões acidentais de substring entre
+    /// palavras diferentes.
+    private func normalizedWords(_ s: String) -> [String] {
         s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            .replacingOccurrences(of: " ", with: "")
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+    }
+
+    /// Verifica se `needle` aparece como subsequência CONTÍGUA de palavras
+    /// dentro de `haystack` (ex: ["property"] dentro de ["property",
+    /// "wrappers"] bate; ["guard"] dentro de ["guardado"] NÃO bate, porque
+    /// agora são comparadas palavra a palavra, não caractere a caractere).
+    private func containsWordSequence(_ needle: [String], in haystack: [String]) -> Bool {
+        guard !needle.isEmpty, needle.count <= haystack.count else { return false }
+        for start in 0...(haystack.count - needle.count) {
+            if Array(haystack[start..<(start + needle.count)]) == needle {
+                return true
+            }
+        }
+        return false
     }
 }
 

@@ -3,8 +3,8 @@
 //  SwiftStudyCoach
 //
 //  Parte 7 — tela "artigo" de leitura do tópico (inspirada no protótipo
-//  reading-interface.html) que orquestra as 3 telas de estudo (Flashcards,
-//  Quiz, Análise de Código) + resultado final, usando o TopicRepository
+//  reading-interface.html) que orquestra as 2 telas de estudo (Quiz,
+//  Análise de Código) + resultado final, usando o TopicRepository
 //  (Parte 4/5) pra cache/persistência e o StudyGenerator (Parte 6) pro
 //  feedback final.
 //
@@ -13,13 +13,20 @@ import SwiftUI
 import SwiftData
 
 private enum ActiveSheet: Identifiable {
-    case flashcards, quiz, codeAnalysis, result
+    // O quiz carrega as perguntas sorteadas junto do próprio caso, em vez de
+    // depender de um @State separado (`quizBatch`) setado "ao mesmo tempo".
+    // Antes, `quizBatch = ...` e `activeSheet = .quiz` eram duas mutações de
+    // @State distintas na mesma ação — o sheet podia abrir usando o valor
+    // ainda antigo/vazio de `quizBatch` na primeira apresentação (por isso
+    // aparecia vazio no primeiro toque e só funcionava no segundo). Com o
+    // valor embutido no case, a apresentação é atômica.
+    case quiz([PersistedQuizQuestion])
+    case codeAnalysis, result
     var id: Int {
         switch self {
-        case .flashcards: return 0
-        case .quiz: return 1
-        case .codeAnalysis: return 2
-        case .result: return 3
+        case .quiz: return 0
+        case .codeAnalysis: return 1
+        case .result: return 2
         }
     }
 }
@@ -36,7 +43,6 @@ struct TopicStudyView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
 
-    @State private var quizBatch: [PersistedQuizQuestion] = []
     @State private var quizAnswers: [AnsweredQuestion] = []
     @State private var codeAnswers: [AnsweredQuestion] = []
     @State private var activeSheet: ActiveSheet?
@@ -131,7 +137,6 @@ struct TopicStudyView: View {
                     .padding(.bottom, 20)
 
                 HStack(spacing: 12) {
-                    PillView(text: "\(topic.flashcards.count) flashcards", borderColor: DS.Colors.hairline)
                     PillView(text: "\(topic.quizPool.count) no pool de quiz", borderColor: DS.Colors.hairline)
                     if topic.isGeneratingPool {
                         HStack(spacing: 5) {
@@ -195,21 +200,13 @@ struct TopicStudyView: View {
 
             VStack(spacing: 10) {
                 actionRow(
-                    title: "Flashcards",
-                    subtitle: "\(topic.flashcards.count) cards",
-                    icon: "rectangle.on.rectangle",
-                    color: DS.Colors.violet
-                ) { activeSheet = .flashcards }
-
-                actionRow(
                     title: "Quiz",
                     subtitle: "3 fácil + 4 média + 3 difícil, sorteadas do pool",
                     icon: "checklist",
                     color: DS.Colors.cyan
                 ) {
                     guard let repository else { return }
-                    quizBatch = repository.sampleQuiz(from: topic)
-                    activeSheet = .quiz
+                    activeSheet = .quiz(repository.sampleQuiz(from: topic))
                 }
                 .disabled(topic.quizPool.isEmpty)
                 .opacity(topic.quizPool.isEmpty ? 0.4 : 1)
@@ -268,12 +265,8 @@ struct TopicStudyView: View {
     @ViewBuilder
     private func sheetContent(_ sheet: ActiveSheet) -> some View {
         switch sheet {
-        case .flashcards:
-            if let topic {
-                FlashcardsView(topicName: topic.name, flashcards: topic.flashcards)
-            }
-        case .quiz:
-            QuizView(topicName: topicName, questions: quizBatch) { answers in
+        case .quiz(let batch):
+            QuizView(topicName: topicName, questions: batch) { answers in
                 quizAnswers = answers
             }
         case .codeAnalysis:
@@ -299,7 +292,6 @@ struct TopicStudyView: View {
     TopicStudyView(topicName: "Actors")
         .modelContainer(for: [
             StudyTopic.self,
-            PersistedFlashcard.self,
             PersistedQuizQuestion.self,
             PersistedCodeAnalysisQuestion.self
         ])
