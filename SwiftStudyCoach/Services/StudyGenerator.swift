@@ -251,6 +251,12 @@ final class StudyGenerator {
             nomes de métodos, classes, structs ou modificadores. Se não tiver certeza de que algo existe, \
             prefira uma abordagem mais simples e genérica em vez de arriscar um nome inventado.
 
+            IMPORTANTE (Plano V5): priorize demonstrar o USO PRÁTICO do conceito, exatamente como um \
+            desenvolvedor usaria no dia a dia (ex.: usar `@State`/`@Observable` numa View real) — NÃO \
+            reimplemente o mecanismo do zero (ex.: criar um property wrapper customizado do zero pra \
+            ilustrar 'Property Wrappers') a menos que o contexto oficial acima trate especificamente de \
+            criar algo customizado. Prefira sempre o exemplo mais simples e direto de uso real.
+
             Formato exato da resposta (texto puro, sem markdown, sem JSON):
             CODIGO:
             <código>
@@ -422,6 +428,9 @@ final class StudyGenerator {
         Gere um exemplo de código Swift completo e compilável, e explique-o passo a passo,
         como se estivesse ensinando alguém que vê aquilo pela primeira vez.
         Use nomes de variáveis e funções descritivos.
+        Priorize demonstrar o USO PRÁTICO do conceito, como um desenvolvedor usaria no dia a dia,
+        em vez de reimplementar o mecanismo por baixo dos panos — a menos que o contexto trate
+        especificamente disso.
         """
 
         return try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
@@ -703,6 +712,9 @@ final class StudyGenerator {
 
         let mlxPrompt = """
         Você é um especialista em Swift. Escreva \(count) trechos de código Swift limpos, de 6 a 10 linhas cada, sobre '\(topic)', e explique o comportamento de cada um. Os trechos devem ser distintos entre si.
+
+        IMPORTANTE: priorize trechos que mostrem o USO PRÁTICO do conceito (como um desenvolvedor
+        realmente usaria), não a reimplementação do mecanismo por baixo dos panos.
 
         [Contexto RAG]:
         \(ragContext.isEmpty ? "Conhecimento geral sobre Swift e Apple Frameworks." : ragContext)
