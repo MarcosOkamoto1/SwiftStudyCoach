@@ -29,7 +29,14 @@ enum DatasetVersion {
     // v6 (Plano V5): dataset reduzido de 21 pra 3 tópicos (NavigationStack,
     // Property Wrappers, async/await) — bump limpa qualquer tópico dos 18
     // removidos que ainda esteja em cache.
-    static var current = "apple-docs-v6"
+    // v7 (Plano V5, hotfix pós-teste real): reset só do cache de conteúdo
+    // gerado (resumo/quiz/exemplo/análise) SEM tocar no modelo MLX já
+    // baixado — junta várias mudanças de geração testadas ao vivo: modelo
+    // Qwen3-Coder-30B-A3B, dedup de geração concorrente, truncamento
+    // corrigido no exemplo de código E na análise de código, quebra de
+    // linha garantida no codeSnippet/code, e exemplos priorizando uso
+    // prático em vez de reimplementar o mecanismo do zero.
+    static var current = "apple-docs-v7"
 }
 
 @Model
