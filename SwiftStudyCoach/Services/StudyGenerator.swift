@@ -696,6 +696,10 @@ final class StudyGenerator {
 
     /// Formata UM rascunho do MLX numa QuizQuestion via Foundation Models.
     /// Nunca lança: se a formatação falhar, devolve o fallback genérico.
+    ///
+    /// Plano V5, PLAN_02: adicionado orçamento de token explícito (370 tokens,
+    /// fórmula 220*1+150) e detecção de truncamento + retry-curto, trazendo
+    /// paridade com formatCodeAnalysisQuestion que já tinha esse padrão correto.
     private func formatHardQuestion(draft: String, topic: String, difficulty: Difficulty, priority: GenerationOrchestrator.Priority) async -> QuizQuestion {
         let cleanDraft = Self.sanitizeDraft(draft)
 
@@ -742,12 +746,31 @@ final class StudyGenerator {
         // contenção entre FM/MLX — isso agora é responsabilidade da fila
         // serial do GenerationOrchestrator (Plano V3 4.2), que garante uma
         // única chamada FM em voo por vez.
+        //
+        // Plano V5, PLAN_02: adicionado orçamento explícito (220*1+150=370)
+        // e detecção de truncamento + retry-curto (mesmo padrão de
+        // formatCodeAnalysisQuestion), evitando que a pergunta seja truncada
+        // por competição de tokens com explicação ou alternativas.
         for attempt in 1...3 {
             do {
+                let options = GenerationOptions(maximumResponseTokens: 370)
                 let formatted = try await Self.timed("formatação de pergunta difícil (FM)", engine: .foundationModels, taskType: .hardQuizFormat, topic: topic) {
                     try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
                         let session = LanguageModelSession(model: model, instructions: formatterInstructions)
-                        return try await session.respond(to: formatterPrompt, generating: QuizQuestion.self)
+                        return try await session.respond(to: formatterPrompt, generating: QuizQuestion.self, options: options)
+                    }
+                }
+                if Self.looksTruncated(formatted.content.question) {
+                    print("⚠️ [pergunta difícil] pergunta parece truncada — retry pedindo versão mais curta.")
+                    let retrySession = LanguageModelSession(model: model, instructions: formatterInstructions)
+                    let retryPrompt = formatterPrompt + "\n\nIMPORTANTE: mantenha a pergunta BREVE (máximo 1-2 frases)."
+                    let retry = try await Self.timed("formatação de pergunta difícil retry (FM)", engine: .foundationModels, taskType: .hardQuizFormat, topic: topic) {
+                        try await GenerationOrchestrator.shared.schedule(engine: .foundationModels, priority: priority) {
+                            try await retrySession.respond(to: retryPrompt, generating: QuizQuestion.self, options: options)
+                        }
+                    }
+                    if !Self.looksTruncated(retry.content.question) {
+                        return retry.content
                     }
                 }
                 return formatted.content
