@@ -169,7 +169,7 @@ final class StudyGenerator {
                 cleanJSON = String(cleanJSON[firstBrace...lastBrace])
             }
             
-            
+            // usa a struct para ajeitar
             if let jsonData = cleanJSON.data(using: .utf8),
                let dto = try? JSONDecoder().decode(MLXQuizAnalysisDTO.self, from: jsonData),
                dto.options.count >= 4 {
@@ -285,7 +285,7 @@ final class StudyGenerator {
                    let lastBrace = cleanJSON.lastIndex(of: "}") {
                     cleanJSON = String(cleanJSON[firstBrace...lastBrace])
                 }
-                
+                // usa a struct
                 if let jsonData = cleanJSON.data(using: .utf8),
                    let dto = try? JSONDecoder().decode(MLXQuizAnalysisDTO.self, from: jsonData),
                    dto.options.count >= 4 {
