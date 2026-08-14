@@ -109,8 +109,8 @@ final class StudyGenerator {
         }
     }
 
-    /// Gera perguntas de quiz. Se for Fácil/Média usa Foundation Model; se for Difícil puxa o MLX!
-    // Struct para decodificar o quiz do MLX
+   
+    // tive que fazer um struct pq tava retornando alternativa no enunciado
     
     private struct MLXQuizAnalysisDTO: Decodable {
         let codeSnippet: String
@@ -122,7 +122,8 @@ final class StudyGenerator {
 
     func generateQuizBatch(topic: String, context: String, difficulty: Difficulty, count: Int) async throws -> [QuizQuestion] {
         
-        // SE FOR DIFÍCIL: Processa via MLX Local com formato JSON
+        //if para se for dificil usa o mlx
+        
         if difficulty == .hard {
             try await MLXService.shared.loadModel()
 
@@ -156,7 +157,7 @@ final class StudyGenerator {
             
             let rawDraft = try await MLXService.shared.generateQuestionDraft(promptContext: mlxPrompt)
             
-            // Sanitização e extração do bloco JSON
+            // limpar o json que retorna
             var cleanJSON = rawDraft
                 .replacingOccurrences(of: "```json", with: "")
                 .replacingOccurrences(of: "```swift", with: "")
@@ -199,7 +200,7 @@ final class StudyGenerator {
             }
         }
         
-        // Usar o Foundation Model para Fácil e Média...
+        // fondation par afacil e media
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {
             throw StudyGeneratorError.modelUnavailable("Modelo indisponível neste device/simulador")
@@ -243,7 +244,7 @@ final class StudyGenerator {
 
 
 
-    /// Gera um lote de perguntas de análise de código (100% dinâmico via MLX + JSON structured output)
+    // mlx para perguntas de analise de codigo
     func generateCodeAnalysisBatch(topic: String, context: String, count: Int = 5) async throws -> [CodeAnalysisQuestion] {
         try await MLXService.shared.loadModel()
 
@@ -273,20 +274,18 @@ final class StudyGenerator {
             for index in 0..<targetCount {
                 let rawDraft = try await MLXService.shared.generateQuestionDraft(promptContext: prompt)
                 
-                // 1. Limpeza de marcadores Markdown (```json ... ```)
+                // limpando o json
                 var cleanJSON = rawDraft
                     .replacingOccurrences(of: "```json", with: "")
                     .replacingOccurrences(of: "```swift", with: "")
                     .replacingOccurrences(of: "```", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 
-                // Extrai o bloco de JSON se o modelo colocou texto em volta
                 if let firstBrace = cleanJSON.firstIndex(of: "{"),
                    let lastBrace = cleanJSON.lastIndex(of: "}") {
                     cleanJSON = String(cleanJSON[firstBrace...lastBrace])
                 }
                 
-                // 2. Tenta fazer o parse do JSON retornado pelo MLX
                 if let jsonData = cleanJSON.data(using: .utf8),
                    let dto = try? JSONDecoder().decode(MLXQuizAnalysisDTO.self, from: jsonData),
                    dto.options.count >= 4 {
@@ -301,7 +300,7 @@ final class StudyGenerator {
                     questionsBatch.append(questionFromMLX)
                     
                 } else {
-                    // 3. Fallback de Segurança caso o MLX gere um JSON malformado
+                    
                     let fallbackQuestion = CodeAnalysisQuestion(
                         codeSnippet: """
                         import SwiftUI
